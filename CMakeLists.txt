@@ -170,34 +170,6 @@ if(UHDR_ENABLE_LOGS)
 endif()
 
 ###########################################################
-# Utils
-###########################################################
-# copied from https://github.com/google/shaderc/blob/main/cmake/utils.cmake
-macro(get_transitive_static_libs target out_list)
-  if(TARGET ${target})
-    get_target_property(target_type ${target} TYPE)
-    if(target_type STREQUAL "STATIC_LIBRARY")
-      list(INSERT ${out_list} 0 ${target})
-      get_target_property(libs ${target} LINK_LIBRARIES)
-      if(libs)
-        foreach(lib ${libs})
-          get_transitive_static_libs(${lib} ${out_list})
-        endforeach()
-      endif()
-    endif()
-  endif()
-endmacro()
-
-# combine a list of static libraries in to a single library
-function(combine_static_libs target output_target)
-  set(all_libs_list "")
-  get_transitive_static_libs(${target} all_libs_list)
-  foreach(lib IN LISTS all_libs_list)
-    target_sources(${output_target} PRIVATE $<TARGET_OBJECTS:${lib}>)
-  endforeach()
-endfunction()
-
-###########################################################
 # Dependencies
 ###########################################################
 
@@ -342,10 +314,9 @@ set_property(DIRECTORY PROPERTY ADDITIONAL_MAKE_CLEAN_FILES
 ###########################################################
 # File Lists
 ###########################################################
-file(GLOB UHDR_CORE_SRCS_LIST "${SOURCE_DIR}/src/*.cpp")
+file(GLOB UHDR_CORE_SRCS_LIST "${SOURCE_DIR}/src/*.cpp" "${THIRD_PARTY_DIR}/image_io/src/**/*.cc")
 file(GLOB UHDR_TEST_SRCS_LIST "${TESTS_DIR}/*.cpp")
 file(GLOB UHDR_BM_SRCS_LIST "${BENCHMARK_DIR}/*.cpp")
-file(GLOB IMAGE_IO_SRCS_LIST "${THIRD_PARTY_DIR}/image_io/src/**/*.cc")
 
 set(PRIVATE_INCLUDE_DIR ${SOURCE_DIR}/include/ ${JPEG_INCLUDE_DIRS})
 set(COMMON_LIBS_LIST ${JPEG_LIBRARIES} Threads::Threads)
@@ -353,33 +324,28 @@ set(COMMON_LIBS_LIST ${JPEG_LIBRARIES} Threads::Threads)
 ###########################################################
 # Targets
 ###########################################################
-set(IMAGEIO_TARGET_NAME image_io)
-add_library(${IMAGEIO_TARGET_NAME} STATIC ${IMAGE_IO_SRCS_LIST})
-target_include_directories(${IMAGEIO_TARGET_NAME} PRIVATE
-  "${THIRD_PARTY_DIR}/image_io/includes"
-  "${THIRD_PARTY_DIR}/image_io/src/modp_b64"
-  "${THIRD_PARTY_DIR}/image_io/src/modp_b64/modp_b64")
-
-set(UHDR_CORE_LIB_NAME core)
-add_library(${UHDR_CORE_LIB_NAME} STATIC ${UHDR_CORE_SRCS_LIST})
+set(UHDR_TARGET_NAME uhdr)
+add_library(${UHDR_TARGET_NAME} STATIC ${UHDR_CORE_SRCS_LIST})
 if(NOT JPEG_FOUND)
-  add_dependencies(${UHDR_CORE_LIB_NAME} ${JPEGTURBO_TARGET_NAME})
+  add_dependencies(${UHDR_TARGET_NAME} ${JPEGTURBO_TARGET_NAME})
 endif()
-#target_compile_options(${UHDR_CORE_LIB_NAME} PRIVATE -Wall -Wextra -Wpedantic)
-target_include_directories(${UHDR_CORE_LIB_NAME} PRIVATE
+#target_compile_options(${UHDR_TARGET_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(${UHDR_TARGET_NAME} PRIVATE
   ${PRIVATE_INCLUDE_DIR}
   "${THIRD_PARTY_DIR}/image_io/includes/"
+  "${THIRD_PARTY_DIR}/image_io/src/modp_b64"
+  "${THIRD_PARTY_DIR}/image_io/src/modp_b64/modp_b64"
 )
-target_include_directories(${UHDR_CORE_LIB_NAME} PUBLIC ${EXPORT_INCLUDE_DIR})
-target_link_libraries(${UHDR_CORE_LIB_NAME} PRIVATE ${COMMON_LIBS_LIST} ${IMAGEIO_TARGET_NAME})
+target_include_directories(${UHDR_TARGET_NAME} PUBLIC ${EXPORT_INCLUDE_DIR})
+target_link_libraries(${UHDR_TARGET_NAME} PRIVATE ${COMMON_LIBS_LIST} ${IMAGEIO_TARGET_NAME})
 
 if(UHDR_BUILD_EXAMPLES)
   add_executable(ultrahdr_app "${EXAMPLES_DIR}/ultrahdr_app.cpp")
-  add_dependencies(ultrahdr_app ${UHDR_CORE_LIB_NAME})
+  add_dependencies(ultrahdr_app ${UHDR_TARGET_NAME})
   if(UHDR_BUILD_FUZZERS)
     target_link_options(ultrahdr_app PRIVATE -fsanitize=fuzzer-no-link)
   endif()
-  target_link_libraries(ultrahdr_app PRIVATE ${UHDR_CORE_LIB_NAME})
+  target_link_libraries(ultrahdr_app PRIVATE ${UHDR_TARGET_NAME})
 endif()
 
 if(UHDR_BUILD_TESTS OR UHDR_BUILD_BENCHMARK)
@@ -400,7 +366,7 @@ endif()
 
 if(UHDR_BUILD_TESTS)
   add_executable(ultrahdr_unit_test ${UHDR_TEST_SRCS_LIST})
-  add_dependencies(ultrahdr_unit_test ${GTEST_TARGET_NAME} ${UHDR_CORE_LIB_NAME})
+  add_dependencies(ultrahdr_unit_test ${GTEST_TARGET_NAME} ${UHDR_TARGET_NAME})
   target_include_directories(ultrahdr_unit_test PRIVATE
     ${PRIVATE_INCLUDE_DIR}
     ${GTEST_INCLUDE_DIRS}
@@ -408,13 +374,13 @@ if(UHDR_BUILD_TESTS)
   if(UHDR_BUILD_FUZZERS)
     target_link_options(ultrahdr_unit_test PRIVATE -fsanitize=fuzzer-no-link)
   endif()
-  target_link_libraries(ultrahdr_unit_test ${UHDR_CORE_LIB_NAME} ${GTEST_BOTH_LIBRARIES})
+  target_link_libraries(ultrahdr_unit_test ${UHDR_TARGET_NAME} ${GTEST_BOTH_LIBRARIES})
   add_test(NAME UHDRUnitTests, COMMAND ultrahdr_unit_test)
 endif()
 
 if(UHDR_BUILD_BENCHMARK)
   add_executable(ultrahdr_bm ${UHDR_BM_SRCS_LIST})
-  add_dependencies(ultrahdr_bm ${BM_TARGET_NAME} ${UHDR_CORE_LIB_NAME})
+  add_dependencies(ultrahdr_bm ${BM_TARGET_NAME} ${UHDR_TARGET_NAME})
   target_include_directories(ultrahdr_bm PRIVATE
     ${PRIVATE_INCLUDE_DIR}
     ${BENCHMARK_INCLUDE_DIR}
@@ -422,7 +388,7 @@ if(UHDR_BUILD_BENCHMARK)
   if(UHDR_BUILD_FUZZERS)
     target_link_options(ultrahdr_bm PRIVATE -fsanitize=fuzzer-no-link)
   endif()
-  target_link_libraries(ultrahdr_bm ${UHDR_CORE_LIB_NAME} ${BENCHMARK_LIBRARIES})
+  target_link_libraries(ultrahdr_bm ${UHDR_TARGET_NAME} ${BENCHMARK_LIBRARIES})
 
   set(RES_FILE "${TESTS_DIR}/data/UltrahdrBenchmarkTestRes-1.0.zip")
   set(RES_FILE_MD5SUM "96651c5c07505c37aa017c57f480e6c1")
@@ -462,33 +428,29 @@ endif()
 
 if(UHDR_BUILD_FUZZERS)
   add_executable(ultrahdr_enc_fuzzer ${FUZZERS_DIR}/ultrahdr_enc_fuzzer.cpp)
-  add_dependencies(ultrahdr_enc_fuzzer ${UHDR_CORE_LIB_NAME})
+  add_dependencies(ultrahdr_enc_fuzzer ${UHDR_TARGET_NAME})
   target_include_directories(ultrahdr_enc_fuzzer PRIVATE ${PRIVATE_INCLUDE_DIR})
   if(DEFINED ENV{LIB_FUZZING_ENGINE})
     target_link_options(ultrahdr_enc_fuzzer PRIVATE $ENV{LIB_FUZZING_ENGINE})
   else()
     target_link_options(ultrahdr_enc_fuzzer PRIVATE -fsanitize=fuzzer)
   endif()
-  target_link_libraries(ultrahdr_enc_fuzzer ${UHDR_CORE_LIB_NAME})
+  target_link_libraries(ultrahdr_enc_fuzzer ${UHDR_TARGET_NAME})
 
   add_executable(ultrahdr_dec_fuzzer ${FUZZERS_DIR}/ultrahdr_dec_fuzzer.cpp)
-  add_dependencies(ultrahdr_dec_fuzzer ${UHDR_CORE_LIB_NAME})
+  add_dependencies(ultrahdr_dec_fuzzer ${UHDR_TARGET_NAME})
   target_include_directories(ultrahdr_dec_fuzzer PRIVATE ${PRIVATE_INCLUDE_DIR})
   if(DEFINED ENV{LIB_FUZZING_ENGINE})
     target_link_options(ultrahdr_dec_fuzzer PRIVATE $ENV{LIB_FUZZING_ENGINE})
   else()
     target_link_options(ultrahdr_dec_fuzzer PRIVATE -fsanitize=fuzzer)
   endif()
-  target_link_libraries(ultrahdr_dec_fuzzer ${UHDR_CORE_LIB_NAME})
+  target_link_libraries(ultrahdr_dec_fuzzer ${UHDR_TARGET_NAME})
 endif()
 
 if(UHDR_ENABLE_INSTALL)
-  set(UHDR_TARGET_NAME uhdr)
-  add_library(${UHDR_TARGET_NAME} SHARED)
-  add_dependencies(${UHDR_TARGET_NAME} ${UHDR_CORE_LIB_NAME})
   target_link_libraries(${UHDR_TARGET_NAME} PRIVATE ${JPEG_LIBRARIES})
   set_target_properties(${UHDR_TARGET_NAME} PROPERTIES PUBLIC_HEADER ultrahdr_api.h)
-  combine_static_libs(${UHDR_CORE_LIB_NAME} ${UHDR_TARGET_NAME})
 
   if(NOT(WIN32 OR XCODE))
     include(GNUInstallDirs)
