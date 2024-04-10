@@ -169,6 +169,11 @@ static bool loadFile(const char* filename, uhdr_raw_image_t* handle) {
       ifd.read(static_cast<char*>(handle->planes[UHDR_PLANE_UV]),
                (handle->w / 2) * (handle->h / 2) * bpp * 2);
       return true;
+    } else if (handle->fmt == UHDR_IMG_FMT_32bppRGBA1010102 ||
+               handle->fmt == UHDR_IMG_FMT_32bppRGBA8888) {
+      const int bpp = 4;
+      ifd.read(static_cast<char*>(handle->planes[UHDR_PLANE_PACKED]), handle->w * handle->h * bpp);
+      return true;
     } else if (handle->fmt == UHDR_IMG_FMT_12bppYCbCr420) {
       ifd.read(static_cast<char*>(handle->planes[UHDR_PLANE_Y]), handle->w * handle->h);
       ifd.read(static_cast<char*>(handle->planes[UHDR_PLANE_U]), (handle->w / 2) * (handle->h / 2));
@@ -235,7 +240,9 @@ class UltraHdrAppInput {
  public:
   UltraHdrAppInput(const char* p010File, const char* yuv420File, const char* yuv420JpegFile,
                    const char* gainmapJpegFile, const char* gainmapMetadataCfgFile, size_t width,
-                   size_t height, uhdr_color_gamut_t p010Cg = UHDR_CG_BT_709,
+                   size_t height, uhdr_img_fmt_t hdr_cf = UHDR_IMG_FMT_UNSPECIFIED,
+                   uhdr_img_fmt_t sdr_cf = UHDR_IMG_FMT_UNSPECIFIED,
+                   uhdr_color_gamut_t p010Cg = UHDR_CG_BT_709,
                    uhdr_color_gamut_t yuv420Cg = UHDR_CG_BT_709,
                    uhdr_color_transfer_t p010Tf = UHDR_CT_HLG, int quality = 100,
                    uhdr_color_transfer_t oTf = UHDR_CT_HLG,
@@ -248,6 +255,8 @@ class UltraHdrAppInput {
         mJpegRFile(nullptr),
         mWidth(width),
         mHeight(height),
+        mHdrCf(hdr_cf),
+        mSdrCf(sdr_cf),
         mP010Cg(p010Cg),
         mYuv420Cg(yuv420Cg),
         mP010Tf(p010Tf),
@@ -263,6 +272,8 @@ class UltraHdrAppInput {
         mJpegRFile(jpegRFile),
         mWidth(0),
         mHeight(0),
+        mHdrCf(UHDR_IMG_FMT_UNSPECIFIED),
+        mSdrCf(UHDR_IMG_FMT_UNSPECIFIED),
         mP010Cg(UHDR_CG_UNSPECIFIED),
         mYuv420Cg(UHDR_CG_UNSPECIFIED),
         mP010Tf(UHDR_CT_UNSPECIFIED),
@@ -304,8 +315,10 @@ class UltraHdrAppInput {
 
   bool fillJpegRImageHandle();
   bool fillP010ImageHandle();
+  bool fillRGB1010102ImageHandle();
   bool convertP010ToRGBImage();
   bool fillYuv420ImageHandle();
+  bool fillRGBA8888ImageHandle();
   bool fillYuv420JpegImageHandle();
   bool fillGainMapJpegImageHandle();
   bool fillGainMapMetadataDescriptor();
@@ -322,11 +335,13 @@ class UltraHdrAppInput {
   const char* mP010File;
   const char* mYuv420File;
   const char* mYuv420JpegFile;
-  const char *mGainMapJpegFile;
-  const char *mGainMapMetadataCfgFile;
+  const char* mGainMapJpegFile;
+  const char* mGainMapMetadataCfgFile;
   const char* mJpegRFile;
   const int mWidth;
   const int mHeight;
+  const uhdr_img_fmt mHdrCf;
+  const uhdr_img_fmt mSdrCf;
   const uhdr_color_gamut_t mP010Cg;
   const uhdr_color_gamut_t mYuv420Cg;
   const uhdr_color_transfer_t mP010Tf;
@@ -381,6 +396,42 @@ bool UltraHdrAppInput::fillYuv420ImageHandle() {
   mRawYuv420Image.stride[UHDR_PLANE_U] = mWidth / 2;
   mRawYuv420Image.stride[UHDR_PLANE_V] = mWidth / 2;
   return loadFile(mYuv420File, &mRawYuv420Image);
+}
+
+bool UltraHdrAppInput::fillRGB1010102ImageHandle() {
+  const int bpp = 4;
+  int p010Size = mWidth * mHeight * bpp;
+  mRawRgba1010102Image.fmt = UHDR_IMG_FMT_32bppRGBA1010102;
+  mRawRgba1010102Image.cg = mP010Cg;
+  mRawRgba1010102Image.ct = mP010Tf;
+  mRawRgba1010102Image.range = UHDR_CR_FULL_RANGE;
+  mRawRgba1010102Image.w = mWidth;
+  mRawRgba1010102Image.h = mHeight;
+  mRawRgba1010102Image.planes[UHDR_PLANE_PACKED] = malloc(mWidth * mHeight * bpp);
+  mRawRgba1010102Image.planes[UHDR_PLANE_UV] = nullptr;
+  mRawRgba1010102Image.planes[UHDR_PLANE_V] = nullptr;
+  mRawRgba1010102Image.stride[UHDR_PLANE_PACKED] = mWidth;
+  mRawRgba1010102Image.stride[UHDR_PLANE_UV] = 0;
+  mRawRgba1010102Image.stride[UHDR_PLANE_V] = 0;
+  return loadFile(mP010File, &mRawRgba1010102Image);
+}
+
+bool UltraHdrAppInput::fillRGBA8888ImageHandle() {
+  const int bpp = 4;
+  int yuv420Size = mWidth * mHeight * bpp;
+  mRawRgba8888Image.fmt = UHDR_IMG_FMT_32bppRGBA8888;
+  mRawRgba8888Image.cg = mYuv420Cg;
+  mRawRgba8888Image.ct = UHDR_CT_SRGB;
+  mRawRgba8888Image.range = UHDR_CR_FULL_RANGE;
+  mRawRgba8888Image.w = mWidth;
+  mRawRgba8888Image.h = mHeight;
+  mRawRgba8888Image.planes[UHDR_PLANE_PACKED] = malloc(mWidth * mHeight * bpp);
+  mRawRgba8888Image.planes[UHDR_PLANE_U] = nullptr;
+  mRawRgba8888Image.planes[UHDR_PLANE_V] = nullptr;
+  mRawRgba8888Image.stride[UHDR_PLANE_Y] = mWidth;
+  mRawRgba8888Image.stride[UHDR_PLANE_U] = 0;
+  mRawRgba8888Image.stride[UHDR_PLANE_V] = 0;
+  return loadFile(mYuv420File, &mRawRgba8888Image);
 }
 
 bool UltraHdrAppInput::fillYuv420JpegImageHandle() {
@@ -482,18 +533,40 @@ bool UltraHdrAppInput::encode() {
 
   uhdr_codec_private_t* handle = uhdr_create_encoder();
   if (mP010File != nullptr) {
-    if (!fillP010ImageHandle()) {
-      std::cerr << " failed to load file " << mP010File << std::endl;
+    if (mHdrCf == UHDR_IMG_FMT_24bppYCbCrP010) {
+      if (!fillP010ImageHandle()) {
+        std::cerr << " failed to load file " << mP010File << std::endl;
+        return false;
+      }
+      RET_IF_ERR(uhdr_enc_set_raw_image(handle, &mRawP010Image, UHDR_HDR_IMG))
+    } else if (mHdrCf == UHDR_IMG_FMT_32bppRGBA1010102) {
+      if (!fillRGB1010102ImageHandle()) {
+        std::cerr << " failed to load file " << mP010File << std::endl;
+        return false;
+      }
+      RET_IF_ERR(uhdr_enc_set_raw_image(handle, &mRawRgba1010102Image, UHDR_HDR_IMG))
+    } else {
+      std::cerr << " invalid hdr intent color format " << mHdrCf << std::endl;
       return false;
     }
-    RET_IF_ERR(uhdr_enc_set_raw_image(handle, &mRawP010Image, UHDR_HDR_IMG))
   }
   if (mYuv420File != nullptr) {
-    if (!fillYuv420ImageHandle()) {
-      std::cerr << " failed to load file " << mYuv420File << std::endl;
+    if (mSdrCf == UHDR_IMG_FMT_12bppYCbCr420) {
+      if (!fillYuv420ImageHandle()) {
+        std::cerr << " failed to load file " << mYuv420File << std::endl;
+        return false;
+      }
+      RET_IF_ERR(uhdr_enc_set_raw_image(handle, &mRawYuv420Image, UHDR_SDR_IMG))
+    } else if (mSdrCf == UHDR_IMG_FMT_32bppRGBA8888) {
+      if (!fillRGBA8888ImageHandle()) {
+        std::cerr << " failed to load file " << mYuv420File << std::endl;
+        return false;
+      }
+      RET_IF_ERR(uhdr_enc_set_raw_image(handle, &mRawRgba8888Image, UHDR_SDR_IMG))
+    } else {
+      std::cerr << " invalid sdr intent color format " << mSdrCf << std::endl;
       return false;
     }
-    RET_IF_ERR(uhdr_enc_set_raw_image(handle, &mRawYuv420Image, UHDR_SDR_IMG))
   }
   if (mYuv420JpegFile != nullptr) {
     if (!fillYuv420JpegImageHandle()) {
@@ -832,8 +905,8 @@ bool UltraHdrAppInput::convertRgba1010102ToYUV444Image() {
       float v = coeffs[6] * r0 + coeffs[7] * g0 + coeffs[8] * b0;
 
       y = (y * 876.0f) + 64.0f + 0.5f;
-      u = (u * 896.0f) + 64.0f + 512.0f + 0.5f;
-      v = (v * 896.0f) + 64.0f + 512.0f + 0.5f;
+      u = (u * 896.0f) + 512.0f + 0.5f;
+      v = (v * 896.0f) + 512.0f + 0.5f;
 
       y = CLIP3(y, 64.0f, 940.0f);
       u = CLIP3(u, 64.0f, 960.0f);
@@ -865,7 +938,7 @@ void UltraHdrAppInput::computeRGBHdrPSNR() {
               << std::endl;
   }
   uint64_t rSqError = 0, gSqError = 0, bSqError = 0;
-  for (size_t i = 0; i < mRawP010Image.w * mRawP010Image.h; i++) {
+  for (size_t i = 0; i < mDestImage.w * mDestImage.h; i++) {
     int rSrc = *rgbDataSrc & 0x3ff;
     int rDst = *rgbDataDst & 0x3ff;
     rSqError += (rSrc - rDst) * (rSrc - rDst);
@@ -881,13 +954,13 @@ void UltraHdrAppInput::computeRGBHdrPSNR() {
     rgbDataSrc++;
     rgbDataDst++;
   }
-  double meanSquareError = (double)rSqError / (mRawP010Image.w * mRawP010Image.h);
+  double meanSquareError = (double)rSqError / (mDestImage.w * mDestImage.h);
   mPsnr[0] = meanSquareError ? 10 * log10((double)1023 * 1023 / meanSquareError) : 100;
 
-  meanSquareError = (double)gSqError / (mRawP010Image.w * mRawP010Image.h);
+  meanSquareError = (double)gSqError / (mDestImage.w * mDestImage.h);
   mPsnr[1] = meanSquareError ? 10 * log10((double)1023 * 1023 / meanSquareError) : 100;
 
-  meanSquareError = (double)bSqError / (mRawP010Image.w * mRawP010Image.h);
+  meanSquareError = (double)bSqError / (mDestImage.w * mDestImage.h);
   mPsnr[2] = meanSquareError ? 10 * log10((double)1023 * 1023 / meanSquareError) : 100;
 
   std::cout << "psnr r :: " << mPsnr[0] << " psnr g :: " << mPsnr[1] << " psnr b :: " << mPsnr[2]
@@ -907,7 +980,7 @@ void UltraHdrAppInput::computeRGBSdrPSNR() {
   }
 
   uint64_t rSqError = 0, gSqError = 0, bSqError = 0;
-  for (size_t i = 0; i < mRawYuv420Image.w * mRawYuv420Image.h; i++) {
+  for (size_t i = 0; i < mDestImage.w * mDestImage.h; i++) {
     int rSrc = *rgbDataSrc & 0xff;
     int rDst = *rgbDataDst & 0xff;
     rSqError += (rSrc - rDst) * (rSrc - rDst);
@@ -923,13 +996,13 @@ void UltraHdrAppInput::computeRGBSdrPSNR() {
     rgbDataSrc++;
     rgbDataDst++;
   }
-  double meanSquareError = (double)rSqError / (mRawYuv420Image.w * mRawYuv420Image.h);
+  double meanSquareError = (double)rSqError / (mDestImage.w * mDestImage.h);
   mPsnr[0] = meanSquareError ? 10 * log10((double)255 * 255 / meanSquareError) : 100;
 
-  meanSquareError = (double)gSqError / (mRawYuv420Image.w * mRawYuv420Image.h);
+  meanSquareError = (double)gSqError / (mDestImage.w * mDestImage.h);
   mPsnr[1] = meanSquareError ? 10 * log10((double)255 * 255 / meanSquareError) : 100;
 
-  meanSquareError = (double)bSqError / (mRawYuv420Image.w * mRawYuv420Image.h);
+  meanSquareError = (double)bSqError / (mDestImage.w * mDestImage.h);
   mPsnr[2] = meanSquareError ? 10 * log10((double)255 * 255 / meanSquareError) : 100;
 
   std::cout << "psnr r :: " << mPsnr[0] << " psnr g :: " << mPsnr[1] << " psnr b :: " << mPsnr[2]
@@ -1061,10 +1134,16 @@ static void usage(const char* name) {
   fprintf(stderr, "\n## ultra hdr demo application.\nUsage : %s \n", name);
   fprintf(stderr, "    -m    mode of operation. [0:encode, 1:decode] \n");
   fprintf(stderr, "\n## encoder options : \n");
-  fprintf(stderr, "    -p    raw 10 bit input resource in p010 color format. \n");
+  fprintf(stderr, "    -p    raw 10 bit input resource \n");
   fprintf(stderr,
-          "    -y    raw 8 bit input resource in yuv420, optional. \n"
+          "    -y    raw 8 bit input resource, optional. \n"
           "          if not provided tonemapping happens internally. \n");
+  fprintf(stderr,
+          "    -a    raw 10 bit input resource color format. Required if raw hdr intent is "
+          "provided. [0:p010, 5:rgb1010102] \n");
+  fprintf(stderr,
+          "    -b    raw 8 bit input resource color format. Required if raw sdr intent is "
+          "provided. [1:yuv420, 3:rgba8888] \n");
   fprintf(stderr, "    -i    compressed 8 bit jpeg file path. \n");
   fprintf(stderr, "    -g    compressed 8 bit gainmap file path. \n");
   fprintf(stderr, "    -f    gainmap metadata config file. \n");
@@ -1089,27 +1168,27 @@ static void usage(const char* name) {
           "hlg, pq shall be paired with rgba1010102. linear shall be paired with rgbahalffloat");
   fprintf(stderr, "\n## examples of usage :\n");
   fprintf(stderr, "\n## encode api-0 :\n");
-  fprintf(stderr, "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -w 1920 -h 1080 -q 97\n");
+  fprintf(stderr, "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -w 1920 -h 1080 -q 97 -a 0\n");
   fprintf(stderr,
-          "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -w 1920 -h 1080 -q 97 -C 1 -t 2\n");
+          "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -w 1920 -h 1080 -q 97 -C 1 -t 2 -a 0\n");
   fprintf(stderr, "\n## encode api-1 :\n");
   fprintf(stderr,
           "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -y cosmat_1920x1080_420.yuv -w 1920 "
-          "-h 1080 -q 97\n");
+          "-h 1080 -q 97 -a 0 -b 1\n");
   fprintf(stderr,
           "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -y cosmat_1920x1080_420.yuv -w 1920 "
-          "-h 1080 -q 97 -C 2 -c 1 -t 1\n");
+          "-h 1080 -q 97 -C 2 -c 1 -t 1 -a 0 -b 1\n");
   fprintf(stderr,
           "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -y cosmat_1920x1080_420.yuv -w 1920 "
-          "-h 1080 -q 97 -C 2 -c 1 -t 1 -e 1\n");
+          "-h 1080 -q 97 -C 2 -c 1 -t 1 -e 1 -a 0 -b 1\n");
   fprintf(stderr, "\n## encode api-2 :\n");
   fprintf(stderr,
           "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -y cosmat_1920x1080_420.yuv -i "
-          "cosmat_1920x1080_420_8bit.jpg -w 1920 -h 1080 -t 1 -o 3 -O 3 -e 1\n");
+          "cosmat_1920x1080_420_8bit.jpg -w 1920 -h 1080 -t 1 -o 3 -O 3 -e 1 -a 0 -b 1\n");
   fprintf(stderr, "\n## encode api-3 :\n");
   fprintf(stderr,
           "    ultrahdr_app -m 0 -p cosmat_1920x1080_p010.yuv -i cosmat_1920x1080_420_8bit.jpg -w "
-          "1920 -h 1080 -t 1 -o 1 -O 5 -e 1\n");
+          "1920 -h 1080 -t 1 -o 1 -O 5 -e 1 -a 0\n");
   fprintf(stderr, "\n## encode api-4 :\n");
   fprintf(stderr,
           "    ultrahdr_app -m 0 -i cosmat_1920x1080_420_8bit.jpg -g cosmat_1920x1080_420_8bit.jpg "
@@ -1122,14 +1201,16 @@ static void usage(const char* name) {
 }
 
 int main(int argc, char* argv[]) {
-  char opt_string[] = "p:y:i:g:f:w:h:C:c:t:q:o:O:m:j:e:";
-  char *p010_file = nullptr, *yuv420_file = nullptr, *jpegr_file = nullptr,
+  char opt_string[] = "p:y:i:g:f:w:h:C:c:t:q:o:O:m:j:e:a:b:";
+  char *hdr_intent_file = nullptr, *sdr_intent_file = nullptr, *jpegr_file = nullptr,
        *yuv420_jpeg_file = nullptr, *gainmap_jpeg_file = nullptr,
        *gainmap_metadata_cfg_file = nullptr;
   int width = 0, height = 0;
-  uhdr_color_gamut_t p010Cg = UHDR_CG_BT_709;
-  uhdr_color_gamut_t yuv420Cg = UHDR_CG_BT_709;
-  uhdr_color_transfer_t p010Tf = UHDR_CT_HLG;
+  uhdr_color_gamut_t hdr_cg = UHDR_CG_BT_709;
+  uhdr_color_gamut_t sdr_cg = UHDR_CG_BT_709;
+  uhdr_img_fmt_t hdr_cf = UHDR_IMG_FMT_UNSPECIFIED;
+  uhdr_img_fmt_t sdr_cf = UHDR_IMG_FMT_UNSPECIFIED;
+  uhdr_color_transfer_t hdr_tf = UHDR_CT_HLG;
   int quality = 100;
   uhdr_color_transfer_t outTf = UHDR_CT_HLG;
   uhdr_img_fmt_t outFmt = UHDR_IMG_FMT_32bppRGBA1010102;
@@ -1138,11 +1219,17 @@ int main(int argc, char* argv[]) {
   int ch;
   while ((ch = getopt_s(argc, argv, opt_string)) != -1) {
     switch (ch) {
+      case 'a':
+        hdr_cf = static_cast<uhdr_img_fmt_t>(atoi(optarg_s));
+        break;
+      case 'b':
+        sdr_cf = static_cast<uhdr_img_fmt_t>(atoi(optarg_s));
+        break;
       case 'p':
-        p010_file = optarg_s;
+        hdr_intent_file = optarg_s;
         break;
       case 'y':
-        yuv420_file = optarg_s;
+        sdr_intent_file = optarg_s;
         break;
       case 'i':
         yuv420_jpeg_file = optarg_s;
@@ -1160,13 +1247,13 @@ int main(int argc, char* argv[]) {
         height = atoi(optarg_s);
         break;
       case 'C':
-        p010Cg = static_cast<uhdr_color_gamut_t>(atoi(optarg_s));
+        hdr_cg = static_cast<uhdr_color_gamut_t>(atoi(optarg_s));
         break;
       case 'c':
-        yuv420Cg = static_cast<uhdr_color_gamut_t>(atoi(optarg_s));
+        sdr_cg = static_cast<uhdr_color_gamut_t>(atoi(optarg_s));
         break;
       case 't':
-        p010Tf = static_cast<uhdr_color_transfer_t>(atoi(optarg_s));
+        hdr_tf = static_cast<uhdr_color_transfer_t>(atoi(optarg_s));
         break;
       case 'q':
         quality = atoi(optarg_s);
@@ -1192,28 +1279,36 @@ int main(int argc, char* argv[]) {
     }
   }
   if (mode == 0) {
-    if ((width <= 0 || height <= 0 || p010_file == nullptr) &&
+    if ((width <= 0 || height <= 0 || hdr_intent_file == nullptr) &&
         (yuv420_jpeg_file == nullptr || gainmap_jpeg_file == nullptr ||
          gainmap_metadata_cfg_file == nullptr)) {
       usage(argv[0]);
       return -1;
     }
-    UltraHdrAppInput appInput(p010_file, yuv420_file, yuv420_jpeg_file, gainmap_jpeg_file,
-                              gainmap_metadata_cfg_file, width, height, p010Cg, yuv420Cg, p010Tf,
-                              quality, outTf, outFmt);
+    UltraHdrAppInput appInput(hdr_intent_file, sdr_intent_file, yuv420_jpeg_file, gainmap_jpeg_file,
+                              gainmap_metadata_cfg_file, width, height, hdr_cf, sdr_cf, hdr_cg,
+                              sdr_cg, hdr_tf, quality, outTf, outFmt);
     if (!appInput.encode()) return -1;
     if (compute_psnr == 1) {
       if (!appInput.decode()) return -1;
-      if (outFmt == UHDR_IMG_FMT_32bppRGBA8888 && yuv420_file != nullptr) {
-        appInput.convertYuv420ToRGBImage();
+      if (outFmt == UHDR_IMG_FMT_32bppRGBA8888 && sdr_intent_file != nullptr) {
+        if (sdr_cf == UHDR_IMG_FMT_12bppYCbCr420) {
+          appInput.convertYuv420ToRGBImage();
+        }
         appInput.computeRGBSdrPSNR();
-        appInput.convertRgba8888ToYUV444Image();
-        appInput.computeYUVSdrPSNR();
-      } else if (outFmt == UHDR_IMG_FMT_32bppRGBA1010102 && p010_file != nullptr) {
-        appInput.convertP010ToRGBImage();
+        if (sdr_cf == UHDR_IMG_FMT_12bppYCbCr420) {
+          appInput.convertRgba8888ToYUV444Image();
+          appInput.computeYUVSdrPSNR();
+        }
+      } else if (outFmt == UHDR_IMG_FMT_32bppRGBA1010102 && hdr_intent_file != nullptr) {
+        if (sdr_cf == UHDR_IMG_FMT_24bppYCbCrP010) {
+          appInput.convertP010ToRGBImage();
+        }
         appInput.computeRGBHdrPSNR();
-        appInput.convertRgba1010102ToYUV444Image();
-        appInput.computeYUVHdrPSNR();
+        if (sdr_cf == UHDR_IMG_FMT_24bppYCbCrP010) {
+          appInput.convertRgba1010102ToYUV444Image();
+          appInput.computeYUVHdrPSNR();
+        }
       } else {
         std::cerr << "failed to compute psnr " << std::endl;
       }

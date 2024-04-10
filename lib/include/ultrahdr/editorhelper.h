@@ -98,6 +98,8 @@ std::unique_ptr<uhdr_raw_image_ext_t> apply_resize(uhdr_raw_image* src, int dst_
 
 void apply_crop(uhdr_raw_image_t* src, int left, int top, int wd, int ht);
 
+std::unique_ptr<uhdr_raw_image_ext_t> convert_input_to_YCbCr(uhdr_raw_image_t* src);
+
 }  // namespace ultrahdr
 
 #endif  // ULTRAHDR_EDITORHELPER_H
