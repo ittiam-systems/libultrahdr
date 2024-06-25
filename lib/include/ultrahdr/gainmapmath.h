@@ -193,7 +193,7 @@ struct GainLUT {
 
   GainLUT(uhdr_gainmap_metadata_ext_t* metadata, float displayBoost) {
     this->mGammaInv = 1.0f / metadata->gamma;
-    float boostFactor = displayBoost > 0 ? displayBoost / metadata->max_content_boost : 1.0f;
+    float boostFactor = displayBoost > 0 ? displayBoost / metadata->hdr_capacity_max : 1.0f;
     for (int32_t idx = 0; idx < kGainFactorNumEntries; idx++) {
       float value = static_cast<float>(idx) / static_cast<float>(kGainFactorNumEntries - 1);
       float logBoost = log2(metadata->min_content_boost) * (1.0f - value) +
@@ -517,6 +517,8 @@ void transformYuv420(uhdr_raw_image_t* image, const std::array<float, 9>& coeffs
  * offsetHdr of 0.0, this function doesn't handle different metadata values for
  * these fields.
  */
+float computeGain(float sdr, float hdr);
+uint8_t affineMapGain(float gainlog2, float mingainlog2, float maxgainlog2);
 uint8_t encodeGain(float y_sdr, float y_hdr, uhdr_gainmap_metadata_ext_t* metadata);
 uint8_t encodeGain(float y_sdr, float y_hdr, uhdr_gainmap_metadata_ext_t* metadata,
                    float log2MinContentBoost, float log2MaxContentBoost);

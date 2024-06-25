@@ -622,6 +622,17 @@ void transformYuv420(uhdr_raw_image_t* image, const std::array<float, 9>& coeffs
 
 ////////////////////////////////////////////////////////////////////////////////
 // Gain map calculations
+float computeGain(float sdr, float hdr) {
+  if (sdr == 0.0f || hdr == 0.0f) return 0.0f;
+  return log2(hdr / sdr);
+}
+
+uint8_t affineMapGain(float gainlog2, float mingainlog2, float maxgainlog2) {
+  float mappedVal = (gainlog2 - mingainlog2) / (maxgainlog2 - mingainlog2);
+  mappedVal *= 255;
+  return CLIP3(mappedVal + 0.5f, 0, 255);
+}
+
 uint8_t encodeGain(float y_sdr, float y_hdr, uhdr_gainmap_metadata_ext_t* metadata) {
   return encodeGain(y_sdr, y_hdr, metadata, log2(metadata->min_content_boost),
                     log2(metadata->max_content_boost));
@@ -654,7 +665,7 @@ Color applyGain(Color e, float gain, uhdr_gainmap_metadata_ext_t* metadata, floa
   gain = pow(gain, 1.0f / metadata->gamma);
   float logBoost =
       log2(metadata->min_content_boost) * (1.0f - gain) + log2(metadata->max_content_boost) * gain;
-  float gainFactor = exp2(logBoost * displayBoost / metadata->max_content_boost);
+  float gainFactor = exp2(logBoost * displayBoost / metadata->hdr_capacity_max);
   return e * gainFactor;
 }
 
@@ -683,9 +694,9 @@ Color applyGain(Color e, Color gain, uhdr_gainmap_metadata_ext_t* metadata, floa
                     log2(metadata->max_content_boost) * gain.g;
   float logBoostB = log2(metadata->min_content_boost) * (1.0f - gain.b) +
                     log2(metadata->max_content_boost) * gain.b;
-  float gainFactorR = exp2(logBoostR * displayBoost / metadata->max_content_boost);
-  float gainFactorG = exp2(logBoostG * displayBoost / metadata->max_content_boost);
-  float gainFactorB = exp2(logBoostB * displayBoost / metadata->max_content_boost);
+  float gainFactorR = exp2(logBoostR * displayBoost / metadata->hdr_capacity_max);
+  float gainFactorG = exp2(logBoostG * displayBoost / metadata->hdr_capacity_max);
+  float gainFactorB = exp2(logBoostB * displayBoost / metadata->hdr_capacity_max);
   return {{{e.r * gainFactorR, e.g * gainFactorG, e.b * gainFactorB}}};
 }
 
@@ -1010,10 +1021,10 @@ Color sampleMap3Channel(uhdr_raw_image_t* map, size_t map_scale_factor, size_t x
 }
 
 uint32_t colorToRgba1010102(Color e_gamma) {
-  return (0x3ff & static_cast<uint32_t>(e_gamma.r * 1023.0f)) |
-         ((0x3ff & static_cast<uint32_t>(e_gamma.g * 1023.0f)) << 10) |
-         ((0x3ff & static_cast<uint32_t>(e_gamma.b * 1023.0f)) << 20) |
-         (0x3 << 30);  // Set alpha to 1.0
+  uint32_t r = CLIP3((e_gamma.r * 1023 + 0.5f), 0.0f, 1023.0f);
+  uint32_t g = CLIP3((e_gamma.g * 1023 + 0.5f), 0.0f, 1023.0f);
+  uint32_t b = CLIP3((e_gamma.b * 1023 + 0.5f), 0.0f, 1023.0f);
+  return (r | (g << 10) | (b << 20) | (0x3 << 30));  // Set alpha to 1.0
 }
 
 uint64_t colorToRgbaF16(Color e_gamma) {
