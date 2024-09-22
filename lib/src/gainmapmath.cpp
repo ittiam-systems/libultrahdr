@@ -681,11 +681,18 @@ float computeGain(float sdr, float hdr) {
   return log2(hdr / sdr);
 }
 
-uint8_t affineMapGain(float gainlog2, float mingainlog2, float maxgainlog2, float gamma) {
-  float mappedVal = (gainlog2 - mingainlog2) / (maxgainlog2 - mingainlog2);
-  if (gamma != 1.0f) mappedVal = pow(mappedVal, gamma);
-  mappedVal *= 255;
-  return CLIP3(mappedVal + 0.5f, 0, 255);
+float affineMapGain(float gainlog2, float mingainlog2, float maxgainlog2) {
+  return (gainlog2 - mingainlog2) / (maxgainlog2 - mingainlog2);
+}
+
+uint8_t encodeGain(float gainlog2, float gamma) {
+  if (gamma != 1.0f) gainlog2 = pow(gainlog2, gamma);
+  gainlog2 *= 255;
+  return CLIP3(gainlog2 + 0.5f, 0, 255);
+}
+
+uint8_t encodeGain(float gainlog2, float mingainlog2, float maxgainlog2, float gamma) {
+  return encodeGain(affineMapGain(gainlog2, mingainlog2, maxgainlog2), gamma);
 }
 
 Color applyGain(Color e, float gain, uhdr_gainmap_metadata_ext_t* metadata) {

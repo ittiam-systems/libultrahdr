@@ -503,6 +503,11 @@ uhdr_error_info_t JpegR::compressGainMap(uhdr_raw_image_t* gainmap_img,
   return jpeg_enc_obj->compressImage(gainmap_img, mMapCompressQuality, nullptr, 0);
 }
 
+float getLogVal(float val) {
+  if (val <= 0.0 || val >= 1.0) return -1.0f;  // exclude boundaries
+  return log(val);
+}
+
 uhdr_error_info_t JpegR::generateGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_image_t* hdr_intent,
                                          uhdr_gainmap_metadata_ext_t* gainmap_metadata,
                                          std::unique_ptr<uhdr_raw_image_ext_t>& gainmap_img,
@@ -652,9 +657,10 @@ uhdr_error_info_t JpegR::generateGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_
                                  hdrInvOetf, hdrGamutConversionFn, luminanceFn, sdrYuvToRgbFn,
                                  hdrYuvToRgbFn, sdr_sample_pixel_fn, hdr_sample_pixel_fn,
                                  hdr_white_nits, use_luminance]() -> void {
+    if (this->mGamma == -1.0f) setGainMapGamma(kGainMapGammaDefault);
     gainmap_metadata->max_content_boost = hdr_white_nits / kSdrWhiteNits;
     gainmap_metadata->min_content_boost = 1.0f;
-    gainmap_metadata->gamma = mGamma;
+    gainmap_metadata->gamma = this->mGamma;
     gainmap_metadata->offset_sdr = 0.0f;
     gainmap_metadata->offset_hdr = 0.0f;
     gainmap_metadata->hdr_capacity_min = 1.0f;
@@ -899,8 +905,8 @@ uhdr_error_info_t JpegR::generateGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_
             size_t src_pixel_idx = j * map_width * 3;
             for (size_t i = 0; i < map_width * 3; i++) {
               reinterpret_cast<uint8_t*>(dest->planes[UHDR_PLANE_PACKED])[dst_pixel_idx + i] =
-                  affineMapGain(gainmap_data[src_pixel_idx + i], min_content_boost_log2,
-                                max_content_boost_log2, this->mGamma);
+                  encodeGain(gainmap_data[src_pixel_idx + i], min_content_boost_log2,
+                             max_content_boost_log2, this->mGamma);
             }
           }
         } else {
@@ -909,27 +915,133 @@ uhdr_error_info_t JpegR::generateGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_
             size_t src_pixel_idx = j * map_width;
             for (size_t i = 0; i < map_width; i++) {
               reinterpret_cast<uint8_t*>(dest->planes[UHDR_PLANE_Y])[dst_pixel_idx + i] =
-                  affineMapGain(gainmap_data[src_pixel_idx + i], min_content_boost_log2,
-                                max_content_boost_log2, this->mGamma);
+                  encodeGain(gainmap_data[src_pixel_idx + i], min_content_boost_log2,
+                             max_content_boost_log2, this->mGamma);
             }
           }
         }
       }
     };
+
+    uhdr_memory_block_t affinedGainmap_mem(
+        map_width * map_height * sizeof(float) *
+        (this->getGainMapGamma() == -1.0f ? (mUseMultiChannelGainMap ? 3 : 1) : 0));
+    float* affinedgainmap_data = reinterpret_cast<float*>(affinedGainmap_mem.m_buffer.get());
+    float gainmap_gamma[3] = {0.0f, 0.0f, 0.0f};
+    std::mutex gainmapgamma_mutex;
+    std::function<void()> affineMap = [this, gainmap_data, affinedgainmap_data, map_width,
+                                       min_content_boost_log2, max_content_boost_log2,
+                                       &gainmap_gamma, &gainmapgamma_mutex, &jobQueue]() -> void {
+      size_t rowStart, rowEnd;
+      float gainmap_gamma_th[3] = {0.0f, 0.0f, 0.0f};
+
+      while (jobQueue.dequeueJob(rowStart, rowEnd)) {
+        if (mUseMultiChannelGainMap) {
+          for (size_t j = rowStart; j < rowEnd; j++) {
+            size_t src_pixel_idx = j * map_width * 3;
+            for (size_t i = 0; i < map_width * 3; i++) {
+              affinedgainmap_data[src_pixel_idx + i] = affineMapGain(
+                  gainmap_data[src_pixel_idx + i], min_content_boost_log2, max_content_boost_log2);
+              gainmap_gamma_th[i % 3] += getLogVal(affinedgainmap_data[src_pixel_idx + i]);
+            }
+          }
+        } else {
+          for (size_t j = rowStart; j < rowEnd; j++) {
+            size_t src_pixel_idx = j * map_width;
+            for (size_t i = 0; i < map_width; i++) {
+              affinedgainmap_data[src_pixel_idx + i] = affineMapGain(
+                  gainmap_data[src_pixel_idx + i], min_content_boost_log2, max_content_boost_log2);
+              gainmap_gamma_th[0] += getLogVal(affinedgainmap_data[src_pixel_idx + i]);
+            }
+          }
+        }
+      }
+      {
+        std::unique_lock<std::mutex> lock{gainmapgamma_mutex};
+        for (int index = 0; index < (mUseMultiChannelGainMap ? 3 : 1); index++) {
+          gainmap_gamma[index] += gainmap_gamma_th[index];
+        }
+      }
+    };
+
+    std::function<void()> encodeAffineMap = [this, affinedgainmap_data, map_width, dest,
+                                             &jobQueue]() -> void {
+      size_t rowStart, rowEnd;
+
+      while (jobQueue.dequeueJob(rowStart, rowEnd)) {
+        if (mUseMultiChannelGainMap) {
+          for (size_t j = rowStart; j < rowEnd; j++) {
+            size_t dst_pixel_idx = j * dest->stride[UHDR_PLANE_PACKED] * 3;
+            size_t src_pixel_idx = j * map_width * 3;
+            for (size_t i = 0; i < map_width * 3; i++) {
+              reinterpret_cast<uint8_t*>(dest->planes[UHDR_PLANE_PACKED])[dst_pixel_idx + i] =
+                  encodeGain(affinedgainmap_data[src_pixel_idx + i], this->mGamma);
+            }
+          }
+        } else {
+          for (size_t j = rowStart; j < rowEnd; j++) {
+            size_t dst_pixel_idx = j * dest->stride[UHDR_PLANE_Y];
+            size_t src_pixel_idx = j * map_width;
+            for (size_t i = 0; i < map_width; i++) {
+              reinterpret_cast<uint8_t*>(dest->planes[UHDR_PLANE_Y])[dst_pixel_idx + i] =
+                  encodeGain(affinedgainmap_data[src_pixel_idx + i], this->mGamma);
+            }
+          }
+        }
+      }
+    };
+
     workers.clear();
     jobQueue.reset();
     rowStep = threads == 1 ? map_height : 1;
-    for (int th = 0; th < threads - 1; th++) {
-      workers.push_back(std::thread(encodeMap));
+    if (this->getGainMapGamma() != -1.0f) {
+      for (int th = 0; th < threads - 1; th++) {
+        workers.push_back(std::thread(encodeMap));
+      }
+      for (size_t rowStart = 0; rowStart < map_height;) {
+        size_t rowEnd = (std::min)(rowStart + rowStep, map_height);
+        jobQueue.enqueueJob(rowStart, rowEnd);
+        rowStart = rowEnd;
+      }
+      jobQueue.markQueueForEnd();
+      encodeMap();
+      std::for_each(workers.begin(), workers.end(), [](std::thread& t) { t.join(); });
+    } else {
+      for (int th = 0; th < threads - 1; th++) {
+        workers.push_back(std::thread(affineMap));
+      }
+      for (size_t rowStart = 0; rowStart < map_height;) {
+        size_t rowEnd = (std::min)(rowStart + rowStep, map_height);
+        jobQueue.enqueueJob(rowStart, rowEnd);
+        rowStart = rowEnd;
+      }
+      jobQueue.markQueueForEnd();
+      affineMap();
+      std::for_each(workers.begin(), workers.end(), [](std::thread& t) { t.join(); });
+
+      if (mUseMultiChannelGainMap) {
+        float sum = gainmap_gamma[0] + gainmap_gamma[1] + gainmap_gamma[2];
+        sum /= (map_width * map_height * 3);
+        setGainMapGamma(-1.0 / sum);
+      } else {
+        float sum = gainmap_gamma[0] / (map_width * map_height);
+        setGainMapGamma(-1.0 / sum);
+      }
+
+      workers.clear();
+      jobQueue.reset();
+      for (int th = 0; th < threads - 1; th++) {
+        workers.push_back(std::thread(encodeAffineMap));
+      }
+      for (size_t rowStart = 0; rowStart < map_height;) {
+        size_t rowEnd = (std::min)(rowStart + rowStep, map_height);
+        jobQueue.enqueueJob(rowStart, rowEnd);
+        rowStart = rowEnd;
+      }
+      jobQueue.markQueueForEnd();
+      encodeAffineMap();
+      std::for_each(workers.begin(), workers.end(), [](std::thread& t) { t.join(); });
     }
-    for (size_t rowStart = 0; rowStart < map_height;) {
-      size_t rowEnd = (std::min)(rowStart + rowStep, map_height);
-      jobQueue.enqueueJob(rowStart, rowEnd);
-      rowStart = rowEnd;
-    }
-    jobQueue.markQueueForEnd();
-    encodeMap();
-    std::for_each(workers.begin(), workers.end(), [](std::thread& t) { t.join(); });
 
     gainmap_metadata->max_content_boost = exp2(max_content_boost_log2);
     gainmap_metadata->min_content_boost = exp2(min_content_boost_log2);

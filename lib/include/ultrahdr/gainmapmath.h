@@ -563,7 +563,9 @@ uint8_t encodeGain(float y_sdr, float y_hdr, uhdr_gainmap_metadata_ext_t* metada
 uint8_t encodeGain(float y_sdr, float y_hdr, uhdr_gainmap_metadata_ext_t* metadata,
                    float log2MinContentBoost, float log2MaxContentBoost);
 float computeGain(float sdr, float hdr);
-uint8_t affineMapGain(float gainlog2, float mingainlog2, float maxgainlog2, float gamma);
+float affineMapGain(float gainlog2, float mingainlog2, float maxgainlog2);
+uint8_t encodeGain(float gainlog2, float gamma);
+uint8_t encodeGain(float gainlog2, float mingainlog2, float maxgainlog2, float gamma);
 
 /*
  * Calculates the linear luminance in nits after applying the given gain

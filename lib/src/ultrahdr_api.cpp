@@ -1284,7 +1284,7 @@ void uhdr_reset_encoder(uhdr_codec_private_t* enc) {
     handle->m_output_format = UHDR_CODEC_JPG;
     handle->m_gainmap_scale_factor = ultrahdr::kMapDimensionScaleFactorDefault;
     handle->m_use_multi_channel_gainmap = ultrahdr::kUseMultiChannelGainMapDefault;
-    handle->m_gamma = ultrahdr::kGainMapGammaDefault;
+    handle->m_gamma = -1.0f;
     handle->m_enc_preset = ultrahdr::kEncSpeedPresetDefault;
     handle->m_min_content_boost = FLT_MIN;
     handle->m_max_content_boost = FLT_MAX;

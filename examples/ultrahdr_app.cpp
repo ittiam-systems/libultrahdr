@@ -696,7 +696,9 @@ bool UltraHdrAppInput::encode() {
   RET_IF_ERR(uhdr_enc_set_quality(handle, mMapCompressQuality, UHDR_GAIN_MAP_IMG))
   RET_IF_ERR(uhdr_enc_set_using_multi_channel_gainmap(handle, mUseMultiChannelGainMap))
   RET_IF_ERR(uhdr_enc_set_gainmap_scale_factor(handle, mMapDimensionScaleFactor))
-  RET_IF_ERR(uhdr_enc_set_gainmap_gamma(handle, mGamma))
+  if (mGamma != 1.0f) {
+    RET_IF_ERR(uhdr_enc_set_gainmap_gamma(handle, mGamma))
+  }
   RET_IF_ERR(uhdr_enc_set_preset(handle, mEncPreset))
   if (mMinContentBoost != FLT_MIN || mMaxContentBoost != FLT_MAX) {
     RET_IF_ERR(uhdr_enc_set_min_max_content_boost(handle, mMinContentBoost, mMaxContentBoost))
@@ -798,6 +800,7 @@ bool UltraHdrAppInput::decode() {
   for (unsigned i = 0; i < output->h; i++, inData += inStride, outData += outStride) {
     memcpy(outData, inData, length);
   }
+
   uhdr_release_decoder(handle);
 
   return mMode == 1 ? writeFile(mOutputFile, &mDecodedUhdrRgbImage) : true;
