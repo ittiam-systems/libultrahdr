@@ -1454,7 +1454,7 @@ uhdr_error_info_t JpegR::applyGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_ima
 
   JobQueue jobQueue;
   std::function<void()> applyRecMap = [sdr_intent, gainmap_img, dest, &jobQueue, &idwTable,
-                                       output_ct, &gainLUT, display_boost,
+                                       output_ct, &gainLUT,
 #if !USE_APPLY_GAIN_LUT
                                        gainmap_metadata, gainmap_weight,
 #endif
@@ -1507,7 +1507,6 @@ uhdr_error_info_t JpegR::applyGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_ima
 #endif
           }
 
-          rgb_hdr = rgb_hdr / display_boost;
           size_t pixel_idx = x + y * dest->stride[UHDR_PLANE_PACKED];
 
           switch (output_ct) {
@@ -1522,6 +1521,7 @@ uhdr_error_info_t JpegR::applyGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_ima
 #else
               ColorTransformFn hdrOetf = hlgOetf;
 #endif
+              rgb_hdr = rgb_hdr * kSdrWhiteNits / kHlgMaxNits;
               Color rgb_gamma_hdr = hdrOetf(rgb_hdr);
               uint32_t rgba_1010102 = colorToRgba1010102(rgb_gamma_hdr);
               reinterpret_cast<uint32_t*>(dest->planes[UHDR_PLANE_PACKED])[pixel_idx] =
@@ -1534,6 +1534,7 @@ uhdr_error_info_t JpegR::applyGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_ima
 #else
               ColorTransformFn hdrOetf = pqOetf;
 #endif
+              rgb_hdr = rgb_hdr * kSdrWhiteNits / kPqMaxNits;
               Color rgb_gamma_hdr = hdrOetf(rgb_hdr);
               uint32_t rgba_1010102 = colorToRgba1010102(rgb_gamma_hdr);
               reinterpret_cast<uint32_t*>(dest->planes[UHDR_PLANE_PACKED])[pixel_idx] =
