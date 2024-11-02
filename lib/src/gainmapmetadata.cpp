@@ -202,8 +202,8 @@ uhdr_error_info_t uhdr_gainmap_metadata_frac::decodeGainmapMetadata(
     uhdr_error_info_t status;
     status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
     status.has_detail = 1;
-    snprintf(status.detail, sizeof status.detail, "received unexpected minimum version %d, expected 0",
-             min_version);
+    snprintf(status.detail, sizeof status.detail,
+             "received unexpected minimum version %d, expected 0", min_version);
     return status;
   }
   UHDR_ERR_CHECK(streamReadU16(in_data, writer_version, pos))
@@ -233,9 +233,12 @@ uhdr_error_info_t uhdr_gainmap_metadata_frac::decodeGainmapMetadata(
     out_metadata->alternateHdrHeadroomD = commonDenominator;
 
     for (int c = 0; c < channelCount; ++c) {
-      UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapMinN[c], pos))
+      uint32_t val;
+      UHDR_ERR_CHECK(streamReadU32(in_data, val, pos))
+      out_metadata->gainMapMinN[c] = val;
       out_metadata->gainMapMinD[c] = commonDenominator;
-      UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapMaxN[c], pos))
+      UHDR_ERR_CHECK(streamReadU32(in_data, val, pos))
+      out_metadata->gainMapMaxN[c] = val;
       out_metadata->gainMapMaxD[c] = commonDenominator;
       UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapGammaN[c], pos))
       out_metadata->gainMapGammaD[c] = commonDenominator;
@@ -250,9 +253,12 @@ uhdr_error_info_t uhdr_gainmap_metadata_frac::decodeGainmapMetadata(
     UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->alternateHdrHeadroomN, pos))
     UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->alternateHdrHeadroomD, pos))
     for (int c = 0; c < channelCount; ++c) {
-      UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapMinN[c], pos))
+      uint32_t val;
+      UHDR_ERR_CHECK(streamReadU32(in_data, val, pos))
+      out_metadata->gainMapMinN[c] = val;
       UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapMinD[c], pos))
-      UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapMaxN[c], pos))
+      UHDR_ERR_CHECK(streamReadU32(in_data, val, pos))
+      out_metadata->gainMapMaxN[c] = val;
       UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapMaxD[c], pos))
       UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapGammaN[c], pos))
       UHDR_ERR_CHECK(streamReadU32(in_data, out_metadata->gainMapGammaD[c], pos))
@@ -350,13 +356,24 @@ uhdr_error_info_t uhdr_gainmap_metadata_frac::gainmapMetadataFloatToFraction(
     return status;                                                                             \
   }
 
-  CONVERT_FLT_TO_UNSIGNED_FRACTION(log2(from->max_content_boost), &to->gainMapMaxN[0],
-                                   &to->gainMapMaxD[0])
+#define CONVERT_FLT_TO_SIGNED_FRACTION(flt, numerator, denominator)                            \
+  if (!floatToSignedFraction(flt, numerator, denominator)) {                                   \
+    uhdr_error_info_t status;                                                                  \
+    status.error_code = UHDR_CODEC_INVALID_PARAM;                                              \
+    status.has_detail = 1;                                                                     \
+    snprintf(status.detail, sizeof status.detail,                                              \
+             "encountered error while representing float %f as a rational number (p/q form) ", \
+             flt);                                                                             \
+    return status;                                                                             \
+  }
+
+  CONVERT_FLT_TO_SIGNED_FRACTION(log2(from->max_content_boost), &to->gainMapMaxN[0],
+                                 &to->gainMapMaxD[0])
   to->gainMapMaxN[2] = to->gainMapMaxN[1] = to->gainMapMaxN[0];
   to->gainMapMaxD[2] = to->gainMapMaxD[1] = to->gainMapMaxD[0];
 
-  CONVERT_FLT_TO_UNSIGNED_FRACTION(log2(from->min_content_boost), &to->gainMapMinN[0],
-                                   &to->gainMapMinD[0]);
+  CONVERT_FLT_TO_SIGNED_FRACTION(log2(from->min_content_boost), &to->gainMapMinN[0],
+                                 &to->gainMapMinD[0]);
   to->gainMapMinN[2] = to->gainMapMinN[1] = to->gainMapMinN[0];
   to->gainMapMinD[2] = to->gainMapMinD[1] = to->gainMapMinD[0];
 

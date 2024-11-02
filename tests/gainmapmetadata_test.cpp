@@ -44,12 +44,12 @@ const std::string kIso = "urn:iso:std:iso:ts:21496:-1";
 TEST_F(GainMapMetadataTest, encodeMetadataThenDecode) {
   uhdr_gainmap_metadata_ext_t expected("1.0");
   expected.max_content_boost = 100.5f;
-  expected.min_content_boost = 1.5f;
+  expected.min_content_boost = 0.000578369f;
   expected.gamma = 1.0f;
-  expected.offset_sdr = 0.0f;
-  expected.offset_hdr = 0.0f;
+  expected.offset_sdr = 0.0625f;
+  expected.offset_hdr = 0.0625f;
   expected.hdr_capacity_min = 1.0f;
-  expected.hdr_capacity_max = expected.max_content_boost;
+  expected.hdr_capacity_max = 10000.0f / 203.0f;
 
   uhdr_gainmap_metadata_frac metadata;
   uhdr_gainmap_metadata_frac::gainmapMetadataFloatToFraction(&expected, &metadata);
