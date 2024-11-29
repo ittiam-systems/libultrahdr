@@ -91,9 +91,9 @@ class GainMapMathTest : public testing::Test {
   Color SrgbYuvGreen() { return {{{0.7152f, -0.38543f, -0.45415f}}}; }
   Color SrgbYuvBlue() { return {{{0.0722f, 0.5f, -0.04585f}}}; }
 
-  Color P3YuvRed() { return {{{0.299f, -0.16874f, 0.5f}}}; }
-  Color P3YuvGreen() { return {{{0.587f, -0.33126f, -0.41869f}}}; }
-  Color P3YuvBlue() { return {{{0.114f, 0.5f, -0.08131f}}}; }
+  Color P3YuvRed() { return {{{0.229f, -0.124362f, 0.5f}}}; }
+  Color P3YuvGreen() { return {{{0.6917f, -0.375638f, -0.448573f}}}; }
+  Color P3YuvBlue() { return {{{0.0793f, 0.5f, -0.051427f}}}; }
 
   Color Bt2100YuvRed() { return {{{0.2627f, -0.13963f, 0.5f}}}; }
   Color Bt2100YuvGreen() { return {{{0.6780f, -0.36037f, -0.45979f}}}; }
@@ -116,9 +116,9 @@ class GainMapMathTest : public testing::Test {
   Pixel SrgbYuvGreenPixel() { return {182, -98, -116}; }
   Pixel SrgbYuvBluePixel() { return {18, 128, -12}; }
 
-  Pixel P3YuvRedPixel() { return {76, -43, 128}; }
-  Pixel P3YuvGreenPixel() { return {150, -84, -107}; }
-  Pixel P3YuvBluePixel() { return {29, 128, -21}; }
+  Pixel P3YuvRedPixel() { return {58, -32, 128}; }
+  Pixel P3YuvGreenPixel() { return {176, -96, -114}; }
+  Pixel P3YuvBluePixel() { return {20, 128, -13}; }
 
   Pixel Bt2100YuvRedPixel() { return {67, -36, 128}; }
   Pixel Bt2100YuvGreenPixel() { return {173, -92, -117}; }
@@ -740,12 +740,12 @@ TEST_F(GainMapMathTest, YuvColorGamutConversion) {
                               const std::array<Color, 5>>,
                    6>
       coeffs_setup_expected{{
-          {kYuvBt709ToBt601, SrgbYuvColors, P3YuvColors},
+          {kYuvBt709ToDisplayP3, SrgbYuvColors, P3YuvColors},
           {kYuvBt709ToBt2100, SrgbYuvColors, Bt2100YuvColors},
-          {kYuvBt601ToBt709, P3YuvColors, SrgbYuvColors},
-          {kYuvBt601ToBt2100, P3YuvColors, Bt2100YuvColors},
+          {kYuvDisplayP3ToBt709, P3YuvColors, SrgbYuvColors},
+          {kYuvDisplayP3ToBt2100, P3YuvColors, Bt2100YuvColors},
           {kYuvBt2100ToBt709, Bt2100YuvColors, SrgbYuvColors},
-          {kYuvBt2100ToBt601, Bt2100YuvColors, P3YuvColors},
+          {kYuvBt2100ToDisplayP3, Bt2100YuvColors, P3YuvColors},
       }};
 
   for (const auto& [coeffs, input, expected] : coeffs_setup_expected) {
@@ -788,12 +788,12 @@ TEST_F(GainMapMathTest, YuvConversionNeon) {
   const std::array<
       std::tuple<const int16_t*, const std::array<Pixel, 5>, const std::array<Pixel, 5>>, 6>
       coeffs_setup_correct{{
-          {kYuv709To601_coeffs_neon, SrgbYuvColors, P3YuvColors},
+          {kYuv709ToP3_coeffs_neon, SrgbYuvColors, P3YuvColors},
           {kYuv709To2100_coeffs_neon, SrgbYuvColors, Bt2100YuvColors},
-          {kYuv601To709_coeffs_neon, P3YuvColors, SrgbYuvColors},
-          {kYuv601To2100_coeffs_neon, P3YuvColors, Bt2100YuvColors},
+          {kYuvP3To709_coeffs_neon, P3YuvColors, SrgbYuvColors},
+          {kYuvP3To2100_coeffs_neon, P3YuvColors, Bt2100YuvColors},
           {kYuv2100To709_coeffs_neon, Bt2100YuvColors, SrgbYuvColors},
-          {kYuv2100To601_coeffs_neon, Bt2100YuvColors, P3YuvColors},
+          {kYuv2100ToP3_coeffs_neon, Bt2100YuvColors, P3YuvColors},
       }};
 
   for (const auto& [coeff_ptr, input, expected] : coeffs_setup_correct) {
@@ -889,8 +889,8 @@ TEST_F(GainMapMathTest, TransformYuv420) {
   uint8_t* cr = cb + input.w * input.h / 4;
 
   const std::array<std::array<float, 9>, 6> conversion_coeffs = {
-      kYuvBt709ToBt601,  kYuvBt709ToBt2100, kYuvBt601ToBt709,
-      kYuvBt601ToBt2100, kYuvBt2100ToBt709, kYuvBt2100ToBt601};
+      kYuvBt709ToDisplayP3,  kYuvBt709ToBt2100, kYuvDisplayP3ToBt709,
+      kYuvDisplayP3ToBt2100, kYuvBt2100ToBt709, kYuvBt2100ToDisplayP3};
 
   for (size_t coeffs_idx = 0; coeffs_idx < conversion_coeffs.size(); ++coeffs_idx) {
     auto output = Yuv420Image();
@@ -958,12 +958,12 @@ TEST_F(GainMapMathTest, TransformYuv420) {
 #if (defined(UHDR_ENABLE_INTRINSICS) && (defined(__ARM_NEON__) || defined(__ARM_NEON)))
 TEST_F(GainMapMathTest, TransformYuv420Neon) {
   const std::array<std::pair<const int16_t*, const std::array<float, 9>>, 6> fixed_floating_coeffs{
-      {{kYuv709To601_coeffs_neon, kYuvBt709ToBt601},
+      {{kYuv709ToP3_coeffs_neon, kYuvBt709ToDisplayP3},
        {kYuv709To2100_coeffs_neon, kYuvBt709ToBt2100},
-       {kYuv601To709_coeffs_neon, kYuvBt601ToBt709},
-       {kYuv601To2100_coeffs_neon, kYuvBt601ToBt2100},
+       {kYuvP3To709_coeffs_neon, kYuvDisplayP3ToBt709},
+       {kYuvP3To2100_coeffs_neon, kYuvDisplayP3ToBt2100},
        {kYuv2100To709_coeffs_neon, kYuvBt2100ToBt709},
-       {kYuv2100To601_coeffs_neon, kYuvBt2100ToBt601}}};
+       {kYuv2100ToP3_coeffs_neon, kYuvBt2100ToDisplayP3}}};
 
   for (const auto& [neon_coeffs_ptr, floating_point_coeffs] : fixed_floating_coeffs) {
     uhdr_raw_image_t input = Yuv420Image32x4();
