@@ -264,9 +264,11 @@ uhdr_error_info_t JpegR::encodeJPEGR(uhdr_raw_image_t* hdr_intent, uhdr_raw_imag
 
   // convert to bt601 YUV encoding for JPEG encode
 #if (defined(UHDR_ENABLE_INTRINSICS) && (defined(__ARM_NEON__) || defined(__ARM_NEON)))
-  UHDR_ERR_CHECK(convertYuv_neon(sdr_intent_yuv, sdr_intent_yuv->cg, UHDR_CG_DISPLAY_P3));
+  UHDR_ERR_CHECK(
+      convertYuv_neon(sdr_intent_yuv, sdr_intent_yuv->cg, (uhdr_color_gamut_t)UHDR_CG_BT_601));
 #else
-  UHDR_ERR_CHECK(convertYuv(sdr_intent_yuv, sdr_intent_yuv->cg, UHDR_CG_DISPLAY_P3));
+  UHDR_ERR_CHECK(
+      convertYuv(sdr_intent_yuv, sdr_intent_yuv->cg, (uhdr_color_gamut_t)UHDR_CG_BT_601));
 #endif
 
   // compress sdr image
@@ -432,11 +434,14 @@ uhdr_error_info_t JpegR::convertYuv(uhdr_raw_image_t* image, uhdr_color_gamut_t 
 
   switch (src_encoding) {
     case UHDR_CG_BT_709:
-      switch (dst_encoding) {
+      switch ((int)dst_encoding) {
+        case UHDR_CG_BT_601:
+          coeffs_ptr = &kYuvBt709ToBt601;
+          break;
         case UHDR_CG_BT_709:
           return status;
         case UHDR_CG_DISPLAY_P3:
-          coeffs_ptr = &kYuvBt709ToBt601;
+          coeffs_ptr = &kYuvBt709ToDisplayP3;
           break;
         case UHDR_CG_BT_2100:
           coeffs_ptr = &kYuvBt709ToBt2100;
@@ -450,14 +455,17 @@ uhdr_error_info_t JpegR::convertYuv(uhdr_raw_image_t* image, uhdr_color_gamut_t 
       }
       break;
     case UHDR_CG_DISPLAY_P3:
-      switch (dst_encoding) {
+      switch ((int)dst_encoding) {
+        case UHDR_CG_BT_601:
+          coeffs_ptr = &kYuvDisplayP3ToBt601;
+          break;
         case UHDR_CG_BT_709:
-          coeffs_ptr = &kYuvBt601ToBt709;
+          coeffs_ptr = &kYuvDisplayP3ToBt709;
           break;
         case UHDR_CG_DISPLAY_P3:
           return status;
         case UHDR_CG_BT_2100:
-          coeffs_ptr = &kYuvBt601ToBt2100;
+          coeffs_ptr = &kYuvDisplayP3ToBt2100;
           break;
         default:
           status.error_code = UHDR_CODEC_INVALID_PARAM;
@@ -468,12 +476,15 @@ uhdr_error_info_t JpegR::convertYuv(uhdr_raw_image_t* image, uhdr_color_gamut_t 
       }
       break;
     case UHDR_CG_BT_2100:
-      switch (dst_encoding) {
+      switch ((int)dst_encoding) {
+        case UHDR_CG_BT_601:
+          coeffs_ptr = &kYuvBt2100ToBt601;
+          break;
         case UHDR_CG_BT_709:
           coeffs_ptr = &kYuvBt2100ToBt709;
           break;
         case UHDR_CG_DISPLAY_P3:
-          coeffs_ptr = &kYuvBt2100ToBt601;
+          coeffs_ptr = &kYuvBt2100ToDisplayP3;
           break;
         case UHDR_CG_BT_2100:
           return status;
@@ -687,7 +698,7 @@ uhdr_error_info_t JpegR::generateGainMap(uhdr_raw_image_t* sdr_intent, uhdr_raw_
   }
 
   if (sdr_is_601) {
-    sdrYuvToRgbFn = p3YuvToRgb;
+    sdrYuvToRgbFn = Bt601YuvToRgb;
   }
 
   unsigned int image_width = sdr_intent->w;
