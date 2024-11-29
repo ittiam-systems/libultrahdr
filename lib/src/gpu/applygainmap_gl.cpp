@@ -98,17 +98,6 @@ static const std::string getYuv420PixelShader = R"__SHADER__(
   }
 )__SHADER__";
 
-static const std::string p3YUVToRGBShader = R"__SHADER__(
-  vec3 p3YuvToRgb(const vec3 color) {
-    const vec3 offset = vec3(0.0, 128.0f / 255.0f, 128.0f / 255.0f);
-    const mat3 transform = mat3(
-        1.0,  1.0, 1.0,
-        0.0, -0.344136286, 1.772,
-        1.402, -0.714136286, 0.0);
-    return clamp(transform * (color - offset), 0.0, 1.0);
-  }
-)__SHADER__";
-
 static const std::string sRGBEOTFShader = R"__SHADER__(
   float sRGBEOTF(float e_gamma) {
     return e_gamma <= 0.04045 ? e_gamma / 12.92 : pow((e_gamma + 0.055) / 1.055, 2.4);
@@ -191,6 +180,13 @@ static const std::string hlgInverseOOTFShader = R"__SHADER__(
   }
 )__SHADER__";
 
+const std::array<float, 9> kBt709YUVToRGB = {1.0f,      0.0f, 1.5748f, 1.0f, -0.18732f,
+                                             -0.46812f, 1.0f, 1.8556f, 0.0f};
+const std::array<float, 9> kP3YUVToRGB = {1.0f,      0.0f, 1.542051f, 1.0f, -0.21106f,
+                                          -0.51044f, 1.0f, 1.841426f, 0.0f};
+const std::array<float, 9> kBt2100YUVToRGB = {1.0f,      0.0f, 1.4746f, 1.0f, -0.16455f,
+                                              -0.57135f, 1.0f, 1.8814f, 0.0f};
+
 template <typename... Args>
 std::string StringFormat(const std::string& format, Args... args) {
   auto size = std::snprintf(nullptr, 0, format.c_str(), args...);
@@ -198,6 +194,30 @@ std::string StringFormat(const std::string& format, Args... args) {
   std::vector<char> buffer(size + 1);  // Add 1 for terminating null byte
   std::snprintf(buffer.data(), buffer.size(), format.c_str(), args...);
   return std::string(buffer.data(), size);  // Exclude the terminating null byte
+}
+
+std::string getYuvToRgbShader(uhdr_color_gamut_t cg) {
+  const float* coeffs = nullptr;
+  if (cg == UHDR_CG_BT_709) {
+    coeffs = kBt709YUVToRGB.data();
+  } else if (cg == UHDR_CG_DISPLAY_P3) {
+    coeffs = kP3YUVToRGB.data();
+  } else if (cg == UHDR_CG_BT_2100) {
+    coeffs = kBt2100YUVToRGB.data();
+  } else {
+    coeffs = kBt709YUVToRGB.data();
+  }
+  return StringFormat(
+      "  vec3 sdrYuvToRgb(const vec3 color) {\n"
+      "    const vec3 offset = vec3(0.0, 128.0f / 255.0f, 128.0f / 255.0f);\n"
+      "    const mat3 transform = mat3(\n"
+      "      %f, %f, %f,\n"
+      "      %f, %f, %f,\n"
+      "      %f, %f, %f);\n"
+      "    return clamp(transform * (color - offset), 0.0, 1.0);\n"
+      "  }\n",
+      coeffs[0], coeffs[3], coeffs[6], coeffs[1], coeffs[4], coeffs[7], coeffs[2], coeffs[5],
+      coeffs[8]);
 }
 
 std::string getClampPixelFloatShader(uhdr_color_transfer_t output_ct) {
@@ -260,7 +280,7 @@ std::string getApplyGainMapFragmentShader(uhdr_img_fmt sdr_fmt, uhdr_img_fmt gm_
   } else if (sdr_fmt == UHDR_IMG_FMT_12bppYCbCr420) {
     shader_code.append(getYuv420PixelShader);
   }
-  shader_code.append(p3YUVToRGBShader);
+  shader_code.append(getYuvToRgbShader(sdr_cg));
   shader_code.append(sRGBEOTFShader);
   shader_code.append(gm_fmt == UHDR_IMG_FMT_8bppYCbCr400 ? getGainMapSampleSingleChannel
                                                          : getGainMapSampleMultiChannel);
@@ -276,7 +296,7 @@ std::string getApplyGainMapFragmentShader(uhdr_img_fmt sdr_fmt, uhdr_img_fmt gm_
   shader_code.append(R"__SHADER__(
     void main() {
       vec3 yuv_gamma_sdr = getYUVPixel();
-      vec3 rgb_gamma_sdr = p3YuvToRgb(yuv_gamma_sdr);
+      vec3 rgb_gamma_sdr = sdrYuvToRgb(yuv_gamma_sdr);
       vec3 rgb_sdr = sRGBEOTF(rgb_gamma_sdr);
   )__SHADER__");
   if (sdr_cg != hdr_cg && !use_base_cg) {
