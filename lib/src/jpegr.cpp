@@ -54,8 +54,16 @@ uhdr_error_info_t applyGainMapGLES(uhdr_raw_image_t* sdr_intent, uhdr_raw_image_
 #endif
 
 // Gain map metadata
+#ifdef UHDR_WRITE_XMP
 static const bool kWriteXmpMetadata = true;
+#else
+static const bool kWriteXmpMetadata = false;
+#endif
+#ifdef UHDR_WRITE_ISO
+static const bool kWriteIso21496_1Metadata = true;
+#else
 static const bool kWriteIso21496_1Metadata = false;
+#endif
 
 static const string kXmpNameSpace = "http://ns.adobe.com/xap/1.0/";
 static const string kIsoNameSpace = "urn:iso:std:iso:ts:21496:-1";
