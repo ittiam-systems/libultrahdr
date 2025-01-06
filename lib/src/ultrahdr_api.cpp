@@ -22,7 +22,9 @@
 #include "ultrahdr/gainmapmath.h"
 #include "ultrahdr/editorhelper.h"
 #include "ultrahdr/jpegr.h"
-#include "ultrahdr/jpegrutils.h"
+#ifdef UHDR_ENABLE_HEIF
+#include "ultrahdr/heifr.h"
+#endif
 
 #include "image_io/base/data_segment_data_source.h"
 #include "image_io/jpeg/jpeg_info.h"
@@ -1153,12 +1155,25 @@ uhdr_error_info_t uhdr_enc_set_output_format(uhdr_codec_private_t* enc, uhdr_cod
     status.error_code = UHDR_CODEC_INVALID_PARAM;
     status.has_detail = 1;
     snprintf(status.detail, sizeof status.detail, "received nullptr for uhdr codec instance");
-  } else if (media_type != UHDR_CODEC_JPG) {
+  }
+#ifdef UHDR_ENABLE_HEIF
+  else if (media_type != UHDR_CODEC_JPG && media_type != UHDR_CODEC_AVIF &&
+           media_type != UHDR_CODEC_HEIF) {
+    status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+    status.has_detail = 1;
+    snprintf(status.detail, sizeof status.detail,
+             "invalid output format %d, expects one of {UHDR_CODEC_JPG, UHDR_CODEC_AVIF, "
+             "UHDR_CODEC_HEIF}",
+             media_type);
+  }
+#else
+  else if (media_type != UHDR_CODEC_JPG) {
     status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
     status.has_detail = 1;
     snprintf(status.detail, sizeof status.detail,
              "invalid output format %d, expects {UHDR_CODEC_JPG}", media_type);
   }
+#endif
   if (status.error_code != UHDR_CODEC_OK) return status;
 
   uhdr_encoder_private* handle = dynamic_cast<uhdr_encoder_private*>(enc);
@@ -1240,13 +1255,12 @@ uhdr_error_info_t uhdr_encode(uhdr_codec_private_t* enc) {
     }
   }
 
+  uhdr_mem_block_t exif{};
+  if (handle->m_exif.size() > 0) {
+    exif.data = handle->m_exif.data();
+    exif.capacity = exif.data_sz = handle->m_exif.size();
+  }
   if (handle->m_output_format == UHDR_CODEC_JPG) {
-    uhdr_mem_block_t exif{};
-    if (handle->m_exif.size() > 0) {
-      exif.data = handle->m_exif.data();
-      exif.capacity = exif.data_sz = handle->m_exif.size();
-    }
-
     ultrahdr::JpegR jpegr(nullptr, handle->m_gainmap_scale_factor,
                           handle->m_quality.find(UHDR_GAIN_MAP_IMG)->second,
                           handle->m_use_multi_channel_gainmap, handle->m_gamma,
@@ -1310,6 +1324,70 @@ uhdr_error_info_t uhdr_encode(uhdr_codec_private_t* enc) {
       snprintf(status.detail, sizeof status.detail,
                "resources required for uhdr_encode() operation are not present");
     }
+  }
+#ifdef UHDR_ENABLE_HEIF
+  else if (handle->m_output_format == UHDR_CODEC_AVIF ||
+           handle->m_output_format == UHDR_CODEC_HEIF) {
+    ultrahdr::HeifR heifr(
+        nullptr, handle->m_gainmap_scale_factor, handle->m_quality.find(UHDR_GAIN_MAP_IMG)->second,
+        handle->m_use_multi_channel_gainmap, handle->m_gamma, handle->m_enc_preset,
+        handle->m_min_content_boost, handle->m_max_content_boost,
+        handle->m_target_disp_max_brightness, handle->m_output_format);
+    if (handle->m_compressed_images.find(UHDR_BASE_IMG) != handle->m_compressed_images.end() &&
+        handle->m_compressed_images.find(UHDR_GAIN_MAP_IMG) != handle->m_compressed_images.end()) {
+      status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+      status.has_detail = 1;
+      snprintf(status.detail, sizeof status.detail,
+               "heif/avif encoding is supported only with raw intents");
+    } else if (handle->m_raw_images.find(UHDR_HDR_IMG) != handle->m_raw_images.end()) {
+      auto& hdr_raw_entry = handle->m_raw_images.find(UHDR_HDR_IMG)->second;
+
+      size_t size = (std::max)((64u * 1024), hdr_raw_entry->w * hdr_raw_entry->h * 3 * 2);
+      handle->m_compressed_output_buffer = std::make_unique<ultrahdr::uhdr_compressed_image_ext_t>(
+          UHDR_CG_UNSPECIFIED, UHDR_CT_UNSPECIFIED, UHDR_CR_UNSPECIFIED, size);
+
+      if (handle->m_compressed_images.find(UHDR_SDR_IMG) == handle->m_compressed_images.end() &&
+          handle->m_raw_images.find(UHDR_SDR_IMG) == handle->m_raw_images.end()) {
+        // api - 0
+        status = heifr.encodeHEIFR(hdr_raw_entry.get(), handle->m_compressed_output_buffer.get(),
+                                   handle->m_quality.find(UHDR_BASE_IMG)->second,
+                                   handle->m_exif.size() > 0 ? &exif : nullptr);
+      } else if (handle->m_compressed_images.find(UHDR_SDR_IMG) !=
+                     handle->m_compressed_images.end() &&
+                 handle->m_raw_images.find(UHDR_SDR_IMG) == handle->m_raw_images.end()) {
+        status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail,
+                 "heif/avif encoding is supported only with raw intents");
+      } else if (handle->m_raw_images.find(UHDR_SDR_IMG) != handle->m_raw_images.end()) {
+        auto& sdr_raw_entry = handle->m_raw_images.find(UHDR_SDR_IMG)->second;
+
+        if (handle->m_compressed_images.find(UHDR_SDR_IMG) == handle->m_compressed_images.end()) {
+          // api - 1
+          status = heifr.encodeHEIFR(hdr_raw_entry.get(), sdr_raw_entry.get(),
+                                     handle->m_compressed_output_buffer.get(),
+                                     handle->m_quality.find(UHDR_BASE_IMG)->second,
+                                     handle->m_exif.size() > 0 ? &exif : nullptr);
+        } else {
+          status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail,
+                   "heif/avif encoding is supported only with raw intents");
+        }
+      }
+    } else {
+      status.error_code = UHDR_CODEC_INVALID_OPERATION;
+      status.has_detail = 1;
+      snprintf(status.detail, sizeof status.detail,
+               "resources required for uhdr_encode() operation are not present");
+    }
+  }
+#endif
+  else {
+    status.error_code = UHDR_CODEC_INVALID_PARAM;
+    status.has_detail = 1;
+    snprintf(status.detail, sizeof status.detail, "unsupported output format %d",
+             handle->m_output_format);
   }
 
   return status;

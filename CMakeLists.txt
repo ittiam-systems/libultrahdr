@@ -143,6 +143,7 @@ option_if_not_defined(UHDR_ENABLE_INSTALL "Enable install and uninstall targets 
 option_if_not_defined(UHDR_ENABLE_INTRINSICS "Build with SIMD acceleration " TRUE)
 option_if_not_defined(UHDR_ENABLE_GLES "Build with GPU acceleration " FALSE)
 option_if_not_defined(UHDR_ENABLE_WERROR "Build with -Werror" FALSE)
+option_if_not_defined(UHDR_ENABLE_EXPERIMENTAL_FEATURES "Enable experimental features " FALSE)
 
 # These options effect only encoding process.
 # Decoding continues to support both iso and xmp irrespective of this configuration.
@@ -186,6 +187,36 @@ if(UHDR_BUILD_DEPS AND UHDR_ENABLE_INSTALL)
                                  # from source, its best to disallow system wide installation of
                                  # uhdr to avoid possible abi/api conflicts.
   message(STATUS "Install and uninstall targets - Disabled")
+endif()
+
+# Side effects if heif/avif support is enabled
+if(UHDR_ENABLE_EXPERIMENTAL_FEATURES)
+  if(UHDR_ENABLE_INSTALL)
+    # since libheif repo is patched with gainmap handling support,
+    # installing is not recommended as it can conflict with pre-existing libheif installations
+    set(UHDR_ENABLE_INSTALL FALSE) # disable install and uninstall targets
+    message(STATUS "Install and uninstall targets - Disabled")
+  endif()
+
+  if(EMSCRIPTEN)
+    message(FATAL_ERROR "Building experimental features not supported for wasm targets")
+  endif()
+
+  # gainmap metadata is written in iso21496-1 format only
+  if(UHDR_WRITE_XMP)
+    set(UHDR_WRITE_XMP FALSE) # disable writing xmp metadata
+    message(STATUS "Writing xmp metadata - Disabled")
+  endif()
+
+  if(NOT UHDR_WRITE_ISO)
+    set(UHDR_WRITE_ISO TRUE) # enable writing xmp metadata
+    message(STATUS "Writing iso21496-1 metadata - Enabled")
+  endif()
+
+  # no install targets, nothing to package
+  if(UHDR_BUILD_PACKAGING) # disable packaging as install and uninstall targets are disabled
+    set(UHDR_BUILD_PACKAGING FALSE)
+  endif()
 endif()
 
 ###########################################################
@@ -498,6 +529,68 @@ if(NOT JPEG_FOUND)
   endif()
 endif()
 
+# libheif
+if(UHDR_ENABLE_EXPERIMENTAL_FEATURES)
+  find_package(AOM QUIET)
+  if(NOT AOM_FOUND)
+    message(FATAL_ERROR "Could NOT find AOM (missing: AOM_LIBRARIES AOM_INCLUDE_DIRS),\
+            retry after installing aom codec at sysroot")
+  else()
+    message(STATUS "Found AOM: ${AOM_LIBRARIES}")
+  endif()
+  find_package(X265 QUIET)
+  if(NOT X265_FOUND)
+    message(STATUS "Could NOT find X265 (missing: X265_LIBRARIES X265_INCLUDE_DIRS)")
+  else()
+    message(STATUS "Found X265: ${X265_LIBRARIES}")
+  endif()
+  find_package(LIBDE265 QUIET)
+  if(NOT LIBDE265_FOUND)
+    message(STATUS "Could NOT find LIBDE265 (missing: LIBDE265_LIBRARIES LIBDE265_INCLUDE_DIRS)")
+  else()
+    message(STATUS "Found LIBDE265: ${LIBDE265_LIBRARIES}")
+  endif()
+  add_compile_options(-DUHDR_ENABLE_HEIF)
+  add_compile_options(-DWITH_EXPERIMENTAL_GAIN_MAP=1)
+  set(LIBHEIF_ARGS -DWITH_EXPERIMENTAL_GAIN_MAP=1)
+  list(APPEND LIBHEIF_ARGS -DWITH_UVG266=0 -DWITH_VVDEC=0 -DWITH_VVENC=0)
+  list(APPEND LIBHEIF_ARGS -DWITH_KVAZAAR=0)
+  list(APPEND LIBHEIF_ARGS -DWITH_DAV1D=0 -DWITH_SvtEnc=0 -DWITH_RAV1E=0)
+  list(APPEND LIBHEIF_ARGS -DWITH_AOM_ENCODER=1 -DWITH_AOM_DECODER=1)
+  list(APPEND LIBHEIF_ARGS -DWITH_OpenH264_ENCODER=0 -DWITH_OpenH264_DECODER=0)
+  list(APPEND LIBHEIF_ARGS -DWITH_LIBDE265=${LIBDE265_FOUND} -DWITH_X265=${X265_FOUND})
+  list(APPEND LIBHEIF_ARGS -DENABLE_PLUGIN_LOADING=0)
+  set(HEIF_TARGET_NAME libheif)
+  set(HEIF_PREFIX_DIR ${CMAKE_CURRENT_BINARY_DIR}/${HEIF_TARGET_NAME})
+  set(HEIF_SOURCE_DIR ${THIRD_PARTY_DIR}/${HEIF_TARGET_NAME})
+  set(HEIF_BINARY_DIR ${HEIF_PREFIX_DIR}/src/${HEIF_TARGET_NAME}-build/libheif)
+  set(HEIF_INCLUDE_DIRS ${HEIF_SOURCE_DIR}/libheif/api/ ${HEIF_BINARY_DIR})
+  set(HEIF_LIB ${CMAKE_STATIC_LIBRARY_PREFIX}heif${CMAKE_STATIC_LIBRARY_SUFFIX})
+  if(MSVC)
+    set(HEIF_LIB ${CMAKE_STATIC_LIBRARY_PREFIX}heif${CMAKE_STATIC_LIBRARY_SUFFIX})
+  else()
+    set(HEIF_LIB ${CMAKE_STATIC_LIBRARY_PREFIX}heif${CMAKE_STATIC_LIBRARY_SUFFIX})
+  endif()
+  if(IS_MULTI)
+    set(HEIF_LIB_PREFIX ${HEIF_BINARY_DIR}/libheif/$<CONFIG>/)
+  else()
+    set(HEIF_LIB_PREFIX ${HEIF_BINARY_DIR}/libheif/)
+  endif()
+  set(HEIF_LIBRARIES ${HEIF_LIB_PREFIX}${HEIF_LIB})
+  ExternalProject_Add(${HEIF_TARGET_NAME}
+      GIT_REPOSITORY https://github.com/strukturag/libheif.git
+      GIT_TAG v1.19.7
+      PATCH_COMMAND git am ${CMAKE_CURRENT_SOURCE_DIR}/cmake/0001-EXP-add-support-for-gainmap-encoding.patch
+      PREFIX ${HEIF_PREFIX_DIR}
+      SOURCE_DIR ${HEIF_SOURCE_DIR}
+      BINARY_DIR ${HEIF_BINARY_DIR}
+      CMAKE_ARGS ${UHDR_CMAKE_ARGS} ${LIBHEIF_ARGS}
+                 -DBUILD_SHARED_LIBS=0
+      BUILD_BYPRODUCTS ${HEIF_LIBRARIES}
+      INSTALL_COMMAND ""
+  )
+endif()
+
 if(UHDR_BUILD_JAVA)
   # build jni and java util classes
   find_package(Java REQUIRED)
@@ -605,6 +698,19 @@ if(UHDR_ENABLE_GLES)
   list(APPEND PRIVATE_INCLUDE_DIR ${EGL_INCLUDE_DIRS} ${OPENGLES3_INCLUDE_DIRS})
   list(APPEND PRIVATE_LINK_LIBS ${EGL_LIBRARIES} ${OPENGLES3_LIBRARIES})
 endif()
+if(UHDR_ENABLE_EXPERIMENTAL_FEATURES)
+  list(APPEND PRIVATE_INCLUDE_DIR ${HEIF_INCLUDE_DIRS})
+  list(APPEND PRIVATE_LINK_LIBS ${HEIF_LIBRARIES})
+  if(AOM_FOUND)
+    list(APPEND PRIVATE_LINK_LIBS ${AOM_LIBRARIES})
+  endif()
+  if(X265_FOUND)
+    list(APPEND PRIVATE_LINK_LIBS ${X265_LIBRARIES})
+  endif()
+  if(LIBDE265_FOUND)
+    list(APPEND PRIVATE_LINK_LIBS ${LIBDE265_LIBRARIES})
+  endif()
+endif()
 
 ###########################################################
 # Targets
@@ -621,6 +727,9 @@ add_library(${UHDR_CORE_LIB_NAME} STATIC ${UHDR_CORE_SRCS_LIST})
 target_compile_options(${UHDR_CORE_LIB_NAME} PRIVATE ${UHDR_WERROR_FLAGS})
 if(NOT JPEG_FOUND)
   add_dependencies(${UHDR_CORE_LIB_NAME} ${JPEGTURBO_TARGET_NAME})
+endif()
+if(UHDR_ENABLE_EXPERIMENTAL_FEATURES)
+  add_dependencies(${UHDR_CORE_LIB_NAME} ${HEIF_TARGET_NAME})
 endif()
 if(NOT MSVC)
   target_compile_options(${UHDR_CORE_LIB_NAME} PRIVATE -Wall -Wextra -Wshadow)

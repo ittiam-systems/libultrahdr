@@ -1,0 +1,879 @@
+From e9bc67ea19305c450951cff1dd0dea4f8cc33f6f Mon Sep 17 00:00:00 2001
+From: Ram Mohan M <ram.mohan@ittiam.com>
+Date: Tue, 7 Jan 2025 16:46:56 +0530
+Subject: [PATCH] [EXP] add support for gainmap encoding
+
+gain map encoding by default is disabled. This can be enabled at
+configure time using option -DWITH_EXPERIMENTAL_GAIN_MAP=1
+---
+ CMakePresets.json                       |   3 +
+ libheif/CMakeLists.txt                  |   7 +
+ libheif/api/libheif/heif.cc             | 110 ++++++++++
+ libheif/api/libheif/heif.h              |  29 +++
+ libheif/api/libheif/heif_experimental.h |  25 +++
+ libheif/api/libheif/heif_plugin.h       |   3 +
+ libheif/context.cc                      |  24 +-
+ libheif/context.h                       |   9 +
+ libheif/file.cc                         |   7 +
+ libheif/file.h                          |   4 +
+ libheif/heif_gain_map.cc                | 281 ++++++++++++++++++++++++
+ libheif/heif_gain_map.h                 |  34 +++
+ libheif/image-items/image_item.cc       |  17 ++
+ libheif/image-items/image_item.h        |   3 +
+ libheif/plugins/encoder_aom.cc          |   5 +
+ libheif/plugins/encoder_kvazaar.cc      |   5 +
+ libheif/plugins/encoder_rav1e.cc        |   5 +
+ libheif/plugins/encoder_x265.cc         |   5 +
+ 18 files changed, 574 insertions(+), 2 deletions(-)
+ create mode 100644 libheif/heif_gain_map.cc
+ create mode 100644 libheif/heif_gain_map.h
+
+diff --git a/CMakePresets.json b/CMakePresets.json
+index bbe8b49a..3662e753 100644
+--- a/CMakePresets.json
++++ b/CMakePresets.json
+@@ -54,6 +54,7 @@
+         "WITH_VVDEC_PLUGIN" : "OFF",
+         "WITH_VVENC" : "ON",
+         "WITH_VVENC_PLUGIN" : "OFF",
++        "WITH_EXPERIMENTAL_GAIN_MAP" : "OFF",
+ 
+         "WITH_REDUCED_VISIBILITY" : "OFF",
+         "WITH_HEADER_COMPRESSION" : "ON",
+@@ -110,6 +111,7 @@
+         "WITH_VVDEC_PLUGIN" : "ON",
+         "WITH_VVENC" : "ON",
+         "WITH_VVENC_PLUGIN" : "ON",
++        "WITH_EXPERIMENTAL_GAIN_MAP" : "OFF",
+ 
+         "WITH_REDUCED_VISIBILITY" : "ON",
+         "WITH_HEADER_COMPRESSION" : "ON",
+@@ -148,6 +150,7 @@
+         "WITH_UVG266" : "OFF",
+         "WITH_VVDEC" : "OFF",
+         "WITH_VVENC" : "OFF",
++        "WITH_EXPERIMENTAL_GAIN_MAP" : "OFF",
+ 
+         "WITH_REDUCED_VISIBILITY" : "ON",
+         "WITH_HEADER_COMPRESSION" : "OFF",
+diff --git a/libheif/CMakeLists.txt b/libheif/CMakeLists.txt
+index e8d7e0dc..78066d57 100644
+--- a/libheif/CMakeLists.txt
++++ b/libheif/CMakeLists.txt
+@@ -249,6 +249,13 @@ if (ENABLE_EXPERIMENTAL_MINI_FORMAT)
+             mini.cc)
+ endif ()
+ 
++if (WITH_EXPERIMENTAL_GAIN_MAP)
++    target_compile_definitions(heif PUBLIC WITH_EXPERIMENTAL_GAIN_MAP=1)
++    target_sources(heif PRIVATE
++            heif_gain_map.h
++            heif_gain_map.cc)
++endif ()
++
+ write_basic_package_version_file(${PROJECT_NAME}-config-version.cmake COMPATIBILITY ExactVersion)
+ 
+ install(TARGETS heif EXPORT ${PROJECT_NAME}-config
+diff --git a/libheif/api/libheif/heif.cc b/libheif/api/libheif/heif.cc
+index 0ff1afa3..563ab1f4 100644
+--- a/libheif/api/libheif/heif.cc
++++ b/libheif/api/libheif/heif.cc
+@@ -46,6 +46,10 @@
+ #include "heif_emscripten.h"
+ #endif
+ 
++#if WITH_EXPERIMENTAL_GAIN_MAP
++#include "heif_gain_map.h"
++#endif
++
+ #include <algorithm>
+ #include <iostream>
+ #include <fstream>
+@@ -3435,6 +3439,112 @@ struct heif_error heif_context_encode_image(struct heif_context* ctx,
+ }
+ 
+ 
++#if WITH_EXPERIMENTAL_GAIN_MAP
++struct heif_error heif_context_encode_gain_map_image(
++    struct heif_context* ctx, const struct heif_image* alternate_image,
++    const struct heif_image_handle* base_image_handle, struct heif_encoder* encoder,
++    const struct heif_encoding_options* input_options,
++    const struct heif_gain_map_metadata* gain_map_metadata,
++    const struct heif_color_profile_nclx* targetNclx, struct heif_image_handle** out_image_handle) {
++  if (!encoder) {
++    return Error(heif_error_Usage_error, heif_suberror_Null_pointer_argument)
++        .error_struct(ctx->context.get());
++  }
++
++  if (out_image_handle) {
++    *out_image_handle = nullptr;
++  }
++
++  Error error;
++
++  std::vector<uint8_t> metadata;
++  error = prepare_gain_map_metadata(gain_map_metadata, metadata);
++  if (error != Error::Ok) {
++    return error.error_struct(ctx->context.get());
++  }
++
++  heif_item_id tmap_item_id = -1;
++  ctx->context->add_tmap_item(metadata, tmap_item_id);
++
++  std::vector<std::shared_ptr<Box>> properties;
++
++  // --- write ISPE property for tmap item
++  std::shared_ptr<Box_ispe> ispe = std::make_shared<Box_ispe>();
++  ispe->set_size(base_image_handle->image->get_ispe_width(),
++                 base_image_handle->image->get_ispe_height());
++
++  properties.push_back(ispe);
++
++  // --- write PIXI property for tmap item
++  std::shared_ptr<Box_pixi> pixi = std::make_shared<Box_pixi>();
++  pixi->add_channel_bits(10);
++  pixi->add_channel_bits(10);
++  pixi->add_channel_bits(10);
++
++  properties.push_back(pixi);
++
++  // --- write COLR property for tmap item
++  if (targetNclx != nullptr) {
++    std::shared_ptr<Box_colr> colr = std::make_shared<Box_colr>();
++    auto target_nclx_profile = std::make_shared<color_profile_nclx>();
++    target_nclx_profile->set_colour_primaries(targetNclx->color_primaries);
++    target_nclx_profile->set_transfer_characteristics(targetNclx->transfer_characteristics);
++    target_nclx_profile->set_matrix_coefficients(targetNclx->matrix_coefficients);
++    target_nclx_profile->set_full_range_flag(targetNclx->full_range_flag);
++    colr->set_color_profile(target_nclx_profile);
++
++    properties.push_back(colr);
++  }
++  // set item properties
++  for (auto& propertyBox : properties) {
++    int index =
++        ctx->context->get_heif_file()->get_ipco_box()->find_or_append_child_box(propertyBox);
++    ctx->context->get_heif_file()->get_ipma_box()->add_property_for_item_ID(
++        tmap_item_id,
++        Box_ipma::PropertyAssociation{propertyBox->is_essential(), uint16_t(index + 1)});
++  }
++
++  heif_encoding_options options;
++  set_default_encoding_options(options);
++  if (input_options != nullptr) {
++    copy_options(options, *input_options);
++  }
++
++  auto gainmap_encoding_result = ctx->context->encode_image(
++      alternate_image->image, encoder, options, heif_image_input_class_gain_map);
++  if (gainmap_encoding_result.error) {
++    return gainmap_encoding_result.error.error_struct(ctx->context.get());
++  }
++
++  std::shared_ptr<ImageItem> gain_map_image = *gainmap_encoding_result;
++  error = ctx->context->link_gain_map(base_image_handle->image, gain_map_image, tmap_item_id);
++  if (error != Error::Ok) {
++    return error.error_struct(ctx->context.get());
++  }
++
++  if (out_image_handle) {
++    *out_image_handle = new heif_image_handle;
++    (*out_image_handle)->image = std::move(gain_map_image);
++    (*out_image_handle)->context = ctx->context;
++  }
++
++  // --- generate altr box
++  auto altr_box = std::make_shared<Box_EntityToGroup>();
++  altr_box->set_short_type(fourcc("altr"));
++  altr_box->set_group_id(ctx->context->get_heif_file()->get_unused_item_id());
++
++  std::vector<heif_item_id> ids;
++  ids.push_back(tmap_item_id);
++  ids.push_back(base_image_handle->image->get_id());
++
++  altr_box->set_item_ids(ids);
++  ctx->context->get_heif_file()->add_entity_group_box(altr_box);
++
++  return heif_error_success;
++}
++#endif
++
++
+ struct heif_error heif_context_encode_grid(struct heif_context* ctx,
+                                            struct heif_image** tiles,
+                                            uint16_t columns,
+diff --git a/libheif/api/libheif/heif.h b/libheif/api/libheif/heif.h
+index 344a106e..a0d896df 100644
+--- a/libheif/api/libheif/heif.h
++++ b/libheif/api/libheif/heif.h
+@@ -97,6 +97,9 @@ LIBHEIF_API int heif_get_version_number_maintenance(void);
+ struct heif_context;
+ struct heif_image_handle;
+ struct heif_image;
++#if WITH_EXPERIMENTAL_GAIN_MAP
++struct heif_gain_map_metadata;
++#endif
+ 
+ 
+ enum heif_error_code
+@@ -884,6 +887,13 @@ typedef uint32_t heif_brand2;
+ */
+ #define heif_brand2_1pic   heif_fourcc('1','p','i','c')
+ 
++/**
++ * HEIF tone map brand (`tmap`).
++ *
++ * This is a compatible brand indicating the file contains a gainmap image.
++ */
++#define heif_brand2_tmap heif_fourcc('t', 'm', 'a', 'p')
++
+ // input data should be at least 12 bytes
+ LIBHEIF_API
+ heif_brand2 heif_read_main_brand(const uint8_t* data, int len);
+@@ -2619,6 +2629,25 @@ LIBHEIF_API
+ int heif_encoder_descriptor_supportes_lossless_compression(const struct heif_encoder_descriptor*);
+ 
+ 
++
++// ====================================================================================================
++//  Gain Map API
++
++#if WITH_EXPERIMENTAL_GAIN_MAP
++
++// Compress the gain map image and write metadata.
++// Returns a handle to the coded image in 'out_image_handle' unless out_image_handle = NULL.
++LIBHEIF_API
++struct heif_error heif_context_encode_gain_map_image(
++    struct heif_context* ctx, const struct heif_image* alternate_image,
++    const struct heif_image_handle* base_image_handle, struct heif_encoder* encoder,
++    const struct heif_encoding_options* input_options,
++    const struct heif_gain_map_metadata* gain_map_metadata,
++    const struct heif_color_profile_nclx* targetNclx, struct heif_image_handle** out_image_handle);
++
++#endif
++
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libheif/api/libheif/heif_experimental.h b/libheif/api/libheif/heif_experimental.h
+index ba7d3e9e..30645848 100644
+--- a/libheif/api/libheif/heif_experimental.h
++++ b/libheif/api/libheif/heif_experimental.h
+@@ -429,6 +429,31 @@ heif_error heif_image_extract_area(const heif_image*,
+                                    struct heif_image** out_image);
+ #endif
+ 
++// --- gain map metadata struct
++
++struct heif_gain_map_metadata {
++  int32_t gainMapMinN[3];
++  uint32_t gainMapMinD[3];
++  int32_t gainMapMaxN[3];
++  uint32_t gainMapMaxD[3];
++  uint32_t gainMapGammaN[3];
++  uint32_t gainMapGammaD[3];
++
++  int32_t baseOffsetN[3];
++  uint32_t baseOffsetD[3];
++  int32_t alternateOffsetN[3];
++  uint32_t alternateOffsetD[3];
++
++  uint32_t baseHdrHeadroomN;
++  uint32_t baseHdrHeadroomD;
++  uint32_t alternateHdrHeadroomN;
++  uint32_t alternateHdrHeadroomD;
++
++  bool backwardDirection;
++  bool useBaseColorSpace;
++};
++
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libheif/api/libheif/heif_plugin.h b/libheif/api/libheif/heif_plugin.h
+index 3a438bfc..533a1ebc 100644
+--- a/libheif/api/libheif/heif_plugin.h
++++ b/libheif/api/libheif/heif_plugin.h
+@@ -129,6 +129,9 @@ enum heif_image_input_class
+   heif_image_input_class_alpha = 2,
+   heif_image_input_class_depth = 3,
+   heif_image_input_class_thumbnail = 4
++#if WITH_EXPERIMENTAL_GAIN_MAP
++  , heif_image_input_class_gain_map = 5
++#endif
+ };
+ 
+ 
+diff --git a/libheif/context.cc b/libheif/context.cc
+index b40efe63..84cc01b7 100644
+--- a/libheif/context.cc
++++ b/libheif/context.cc
+@@ -329,7 +329,6 @@ Error HeifContext::interpret_heif_file()
+   m_top_level_images.clear();
+   m_primary_image.reset();
+ 
+-
+   // --- reference all non-hidden images
+ 
+   std::vector<heif_item_id> image_IDs = m_heif_file->get_item_IDs();
+@@ -784,7 +783,6 @@ Error HeifContext::interpret_heif_file()
+     }
+ 
+     std::string item_uri_type = m_heif_file->get_item_uri_type(id);
+-
+     // we now assign all kinds of metadata to the image, not only 'Exif' and 'XMP'
+ 
+     std::shared_ptr<ImageMetadata> metadata = std::make_shared<ImageMetadata>();
+@@ -1158,6 +1156,28 @@ create_alpha_image_from_image_alpha_channel(const std::shared_ptr<HeifPixelImage
+ }
+ 
+ 
++#if WITH_EXPERIMENTAL_GAIN_MAP
++Error HeifContext::add_tmap_item(const std::vector<uint8_t>& data, heif_item_id& item_id) {
++  auto tmap_infe = m_heif_file->add_new_infe_box(fourcc("tmap"));  // gain map metadata
++  tmap_infe->set_item_name("GMap");
++  item_id = tmap_infe->get_item_ID();
++
++  m_heif_file->append_iloc_data(item_id, data, 0);
++
++  return Error::Ok;
++}
++
++Error HeifContext::link_gain_map(const std::shared_ptr<ImageItem>& primary_image,
++                                 const std::shared_ptr<ImageItem>& gain_map_image,
++                                 const heif_item_id tmap_id) {
++  m_heif_file->add_iref_reference(tmap_id, fourcc("dimg"),
++                                  {primary_image->get_id(), gain_map_image->get_id()});
++
++  return Error::Ok;
++}
++#endif
++
++
+ Result<std::shared_ptr<ImageItem>> HeifContext::encode_image(const std::shared_ptr<HeifPixelImage>& pixel_image,
+                                 struct heif_encoder* encoder,
+                                 const struct heif_encoding_options& in_options,
+diff --git a/libheif/context.h b/libheif/context.h
+index 3f4f0bc3..48e86c8a 100644
+--- a/libheif/context.h
++++ b/libheif/context.h
+@@ -47,6 +47,7 @@ class StreamWriter;
+ 
+ class ImageItem;
+ 
++class ImageMetadata;
+ 
+ // This is a higher-level view than HeifFile.
+ // Images are grouped logically into main images and their thumbnails.
+@@ -147,6 +148,14 @@ public:
+ 
+   Result<heif_item_id> add_pyramid_group(const std::vector<heif_item_id>& layers);
+ 
++#if WITH_EXPERIMENTAL_GAIN_MAP
++  Error add_tmap_item(const std::vector<uint8_t>& metadata, heif_item_id& item_id);
++
++  Error link_gain_map(const std::shared_ptr<ImageItem>& primary_image,
++                      const std::shared_ptr<ImageItem>& gain_map_image, const heif_item_id tmap_id);
++#endif
++
++
+   // --- region items
+ 
+   void add_region_item(std::shared_ptr<RegionItem> region_item)
+diff --git a/libheif/file.cc b/libheif/file.cc
+index 8a678bf9..6eef3207 100644
+--- a/libheif/file.cc
++++ b/libheif/file.cc
+@@ -192,6 +192,9 @@ void HeifFile::set_brand(heif_compression_format format, bool miaf_compatible)
+       m_ftyp_box->set_minor_version(0);
+       m_ftyp_box->add_compatible_brand(heif_brand2_mif1);
+       m_ftyp_box->add_compatible_brand(heif_brand2_heic);
++#if WITH_EXPERIMENTAL_GAIN_MAP
++      m_ftyp_box->add_compatible_brand(heif_brand2_tmap);
++#endif
+       break;
+ 
+     case heif_compression_AV1:
+@@ -199,6 +202,9 @@ void HeifFile::set_brand(heif_compression_format format, bool miaf_compatible)
+       m_ftyp_box->set_minor_version(0);
+       m_ftyp_box->add_compatible_brand(heif_brand2_avif);
+       m_ftyp_box->add_compatible_brand(heif_brand2_mif1);
++#if WITH_EXPERIMENTAL_GAIN_MAP
++      m_ftyp_box->add_compatible_brand(heif_brand2_tmap);
++#endif
+       break;
+ 
+     case heif_compression_VVC:
+@@ -1172,6 +1178,7 @@ void HeifFile::set_auxC_property(heif_item_id id, const std::string& type)
+   m_ipma_box->add_property_for_item_ID(id, Box_ipma::PropertyAssociation{true, uint16_t(index + 1)});
+ }
+ 
++
+ #if defined(__MINGW32__) || defined(__MINGW64__) || defined(_MSC_VER)
+ std::wstring HeifFile::convert_utf8_path_to_utf16(std::string str)
+ {
+diff --git a/libheif/file.h b/libheif/file.h
+index 1a1585a4..ddfe497a 100644
+--- a/libheif/file.h
++++ b/libheif/file.h
+@@ -91,6 +91,10 @@ public:
+ 
+   uint32_t get_item_type_4cc(heif_item_id ID) const;
+ 
++#if WITH_EXPERIMENTAL_GAIN_MAP
++  std::string get_item_name(heif_item_id ID) const;
++#endif
++
+   std::string get_content_type(heif_item_id ID) const;
+ 
+   std::string get_item_uri_type(heif_item_id ID) const;
+diff --git a/libheif/heif_gain_map.cc b/libheif/heif_gain_map.cc
+new file mode 100644
+index 00000000..0487dfb1
+--- /dev/null
++++ b/libheif/heif_gain_map.cc
+@@ -0,0 +1,281 @@
++/*
++ * HEIF codec.
++ * Copyright (c) 2017 Dirk Farin <dirk.farin@gmail.com>
++ *
++ * This file is part of libheif.
++ *
++ * libheif is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Lesser General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * libheif is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with libheif.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "heif_gain_map.h"
++
++constexpr uint8_t kIsMultiChannelMask = (1u << 7);
++constexpr uint8_t kUseBaseColorSpaceMask = (1u << 6);
++
++void streamWriteU8(std::vector<uint8_t> &data, uint8_t value) { data.push_back(value); }
++
++void streamWriteU16(std::vector<uint8_t> &data, uint32_t value) {
++  data.push_back((uint8_t)((value >> 8) & 0xff));
++  data.push_back((uint8_t)(value & 0xff));
++}
++
++void streamWriteU32(std::vector<uint8_t> &data, uint32_t value) {
++  data.push_back((uint8_t)((value >> 24) & 0xff));
++  data.push_back((uint8_t)((value >> 16) & 0xff));
++  data.push_back((uint8_t)((value >> 8) & 0xff));
++  data.push_back((uint8_t)(value & 0xff));
++}
++
++void streamWriteS32(std::vector<uint8_t> &data, int32_t value) {
++  data.push_back((uint8_t)((value >> 24) & 0xff));
++  data.push_back((uint8_t)((value >> 16) & 0xff));
++  data.push_back((uint8_t)((value >> 8) & 0xff));
++  data.push_back((uint8_t)(value & 0xff));
++}
++
++Error streamReadU8(const std::vector<uint8_t> &data, uint8_t &value, size_t &pos) {
++  if (pos >= data.size()) {
++    return Error(heif_error_Invalid_input, heif_suberror_End_of_data);
++  }
++  value = data[pos++];
++  return Error::Ok;
++}
++
++Error streamReadU16(const std::vector<uint8_t> &data, uint16_t &value, size_t &pos) {
++  if (pos >= data.size() - 1) {
++    return Error(heif_error_Invalid_input, heif_suberror_End_of_data);
++  }
++  value = (uint16_t)(data[pos] << 8 | data[pos + 1]);
++  pos += 2;
++  return Error::Ok;
++}
++
++Error streamReadU32(const std::vector<uint8_t> &data, uint32_t &value, size_t &pos) {
++  if (pos >= data.size() - 3) {
++    return Error(heif_error_Invalid_input, heif_suberror_End_of_data);
++  }
++  value = (uint32_t)(data[pos] << 24 | data[pos + 1] << 16 | data[pos + 2] << 8 | data[pos + 3]);
++  pos += 4;
++  return Error::Ok;
++}
++
++Error streamReadS32(const std::vector<uint8_t> &data, int32_t &value, size_t &pos) {
++  if (pos >= data.size() - 3) {
++    return Error(heif_error_Invalid_input, heif_suberror_End_of_data);
++  }
++  value = (int32_t)(data[pos] << 24 | data[pos + 1] << 16 | data[pos + 2] << 8 | data[pos + 3]);
++  pos += 4;
++  return Error::Ok;
++}
++
++Error prepare_gain_map_metadata(const heif_gain_map_metadata *metadata,
++                                std::vector<uint8_t> &data) {
++  if (metadata == nullptr) {
++    return Error(heif_error_Usage_error, heif_suberror_Null_pointer_argument);
++  }
++
++  const uint8_t version = 0;
++  streamWriteU8(data, version);  // version = 0
++
++  const uint16_t minimumVersion = 0;
++  streamWriteU16(data, minimumVersion);  // minimum version
++
++  const uint16_t writerVersion = 0;
++  streamWriteU16(data, writerVersion);  // writer version
++
++  const bool allChannelsIdentical =
++      metadata->gainMapMinN[0] == metadata->gainMapMinN[1] &&
++      metadata->gainMapMinN[0] == metadata->gainMapMinN[2] &&
++      metadata->gainMapMinD[0] == metadata->gainMapMinD[1] &&
++      metadata->gainMapMinD[0] == metadata->gainMapMinD[2] &&
++      metadata->gainMapMaxN[0] == metadata->gainMapMaxN[1] &&
++      metadata->gainMapMaxN[0] == metadata->gainMapMaxN[2] &&
++      metadata->gainMapMaxD[0] == metadata->gainMapMaxD[1] &&
++      metadata->gainMapMaxD[0] == metadata->gainMapMaxD[2] &&
++      metadata->gainMapGammaN[0] == metadata->gainMapGammaN[1] &&
++      metadata->gainMapGammaN[0] == metadata->gainMapGammaN[2] &&
++      metadata->gainMapGammaD[0] == metadata->gainMapGammaD[1] &&
++      metadata->gainMapGammaD[0] == metadata->gainMapGammaD[2] &&
++      metadata->baseOffsetN[0] == metadata->baseOffsetN[1] &&
++      metadata->baseOffsetN[0] == metadata->baseOffsetN[2] &&
++      metadata->baseOffsetD[0] == metadata->baseOffsetD[1] &&
++      metadata->baseOffsetD[0] == metadata->baseOffsetD[2] &&
++      metadata->alternateOffsetN[0] == metadata->alternateOffsetN[1] &&
++      metadata->alternateOffsetN[0] == metadata->alternateOffsetN[2] &&
++      metadata->alternateOffsetD[0] == metadata->alternateOffsetD[1] &&
++      metadata->alternateOffsetD[0] == metadata->alternateOffsetD[2];
++  const uint8_t channelCount = allChannelsIdentical ? 1u : 3u;
++
++  uint8_t flags = 0u;
++  if (channelCount == 3) {
++    flags |= kIsMultiChannelMask;
++  }
++  if (metadata->useBaseColorSpace) {
++    flags |= kUseBaseColorSpaceMask;
++  }
++  if (metadata->backwardDirection) {
++    flags |= 4;
++  }
++  const uint32_t denom = metadata->baseHdrHeadroomD;
++  bool useCommonDenominator = true;
++  if (metadata->baseHdrHeadroomD != denom || metadata->alternateHdrHeadroomD != denom) {
++    useCommonDenominator = false;
++  }
++  for (int c = 0; c < channelCount; ++c) {
++    if (metadata->gainMapMinD[c] != denom || metadata->gainMapMaxD[c] != denom ||
++        metadata->gainMapGammaD[c] != denom || metadata->baseOffsetD[c] != denom ||
++        metadata->alternateOffsetD[c] != denom) {
++      useCommonDenominator = false;
++    }
++  }
++  if (useCommonDenominator) {
++    flags |= 8;
++  }
++  streamWriteU8(data, flags);
++
++  if (useCommonDenominator) {
++    streamWriteU32(data, denom);
++    streamWriteU32(data, metadata->baseHdrHeadroomN);
++    streamWriteU32(data, metadata->alternateHdrHeadroomN);
++    for (int c = 0; c < channelCount; ++c) {
++      streamWriteS32(data, metadata->gainMapMinN[c]);
++      streamWriteS32(data, metadata->gainMapMaxN[c]);
++      streamWriteU32(data, metadata->gainMapGammaN[c]);
++      streamWriteS32(data, metadata->baseOffsetN[c]);
++      streamWriteS32(data, metadata->alternateOffsetN[c]);
++    }
++  } else {
++    streamWriteU32(data, metadata->baseHdrHeadroomN);
++    streamWriteU32(data, metadata->baseHdrHeadroomD);
++    streamWriteU32(data, metadata->alternateHdrHeadroomN);
++    streamWriteU32(data, metadata->alternateHdrHeadroomD);
++    for (int c = 0; c < channelCount; ++c) {
++      streamWriteS32(data, metadata->gainMapMinN[c]);
++      streamWriteU32(data, metadata->gainMapMinD[c]);
++      streamWriteS32(data, metadata->gainMapMaxN[c]);
++      streamWriteU32(data, metadata->gainMapMaxD[c]);
++      streamWriteU32(data, metadata->gainMapGammaN[c]);
++      streamWriteU32(data, metadata->gainMapGammaD[c]);
++      streamWriteS32(data, metadata->baseOffsetN[c]);
++      streamWriteU32(data, metadata->baseOffsetD[c]);
++      streamWriteS32(data, metadata->alternateOffsetN[c]);
++      streamWriteU32(data, metadata->alternateOffsetD[c]);
++    }
++  }
++
++  return Error::Ok;
++}
++
++Error parse_gain_map_metadata(const std::vector<uint8_t> &data, heif_gain_map_metadata *metadata) {
++  if (metadata == nullptr) {
++    return Error(heif_error_Usage_error, heif_suberror_Null_pointer_argument);
++  }
++  size_t pos = 0;
++
++#define PARSE_ERR_CHECK(x)                 \
++  {                                        \
++    Error err(x);                          \
++    if (err.error_code != heif_error_Ok) { \
++      return err;                          \
++    }                                      \
++  }
++
++  uint8_t version = 0xff;
++  PARSE_ERR_CHECK(streamReadU8(data, version, pos))
++  if (version != 0) {
++    return Error(heif_error_Invalid_input, heif_suberror_Unsupported_data_version,
++                 "Box[tmap] has unsupported version");
++  }
++
++  uint16_t minimum_version = 0xffff;
++  PARSE_ERR_CHECK(streamReadU16(data, minimum_version, pos))
++  if (minimum_version > 0) {
++    return Error(heif_error_Invalid_input, heif_suberror_Unsupported_data_version,
++                 "Box[tmap] has unsupported minimum version");
++  }
++
++  uint16_t writer_version = 0xffff;
++  PARSE_ERR_CHECK(streamReadU16(data, writer_version, pos))
++  if (writer_version > 0) {
++    return Error(heif_error_Invalid_input, heif_suberror_Unsupported_data_version,
++                 "Box[tmap] has unsupported writer version");
++  }
++
++  uint8_t flags = 0xff;
++  PARSE_ERR_CHECK(streamReadU8(data, flags, pos))
++
++  uint8_t channelCount = ((flags & kIsMultiChannelMask) != 0) * 2 + 1;
++  if (!(channelCount == 1 || channelCount == 3)) {
++    return Error(heif_error_Invalid_input, heif_suberror_Unsupported_data_version,
++                 "Gain map image must have either 1 or 3 channels");
++  }
++  metadata->useBaseColorSpace = (flags & kUseBaseColorSpaceMask) != 0;
++  metadata->backwardDirection = (flags & 4) != 0;
++  const bool useCommonDenominator = (flags & 8) != 0;
++
++  if (useCommonDenominator) {
++    uint32_t commonDenominator = 1u;
++    PARSE_ERR_CHECK(streamReadU32(data, commonDenominator, pos))
++
++    PARSE_ERR_CHECK(streamReadU32(data, metadata->baseHdrHeadroomN, pos))
++    metadata->baseHdrHeadroomD = commonDenominator;
++    PARSE_ERR_CHECK(streamReadU32(data, metadata->alternateHdrHeadroomN, pos))
++    metadata->alternateHdrHeadroomD = commonDenominator;
++
++    for (int c = 0; c < channelCount; ++c) {
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->gainMapMinN[c], pos))
++      metadata->gainMapMinD[c] = commonDenominator;
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->gainMapMaxN[c], pos))
++      metadata->gainMapMaxD[c] = commonDenominator;
++      PARSE_ERR_CHECK(streamReadU32(data, metadata->gainMapGammaN[c], pos))
++      metadata->gainMapGammaD[c] = commonDenominator;
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->baseOffsetN[c], pos))
++      metadata->baseOffsetD[c] = commonDenominator;
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->alternateOffsetN[c], pos))
++      metadata->alternateOffsetD[c] = commonDenominator;
++    }
++  } else {
++    PARSE_ERR_CHECK(streamReadU32(data, metadata->baseHdrHeadroomN, pos))
++    PARSE_ERR_CHECK(streamReadU32(data, metadata->baseHdrHeadroomD, pos))
++    PARSE_ERR_CHECK(streamReadU32(data, metadata->alternateHdrHeadroomN, pos))
++    PARSE_ERR_CHECK(streamReadU32(data, metadata->alternateHdrHeadroomD, pos))
++    for (int c = 0; c < channelCount; ++c) {
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->gainMapMinN[c], pos))
++      PARSE_ERR_CHECK(streamReadU32(data, metadata->gainMapMinD[c], pos))
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->gainMapMaxN[c], pos))
++      PARSE_ERR_CHECK(streamReadU32(data, metadata->gainMapMaxD[c], pos))
++      PARSE_ERR_CHECK(streamReadU32(data, metadata->gainMapGammaN[c], pos))
++      PARSE_ERR_CHECK(streamReadU32(data, metadata->gainMapGammaD[c], pos))
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->baseOffsetN[c], pos))
++      PARSE_ERR_CHECK(streamReadU32(data, metadata->baseOffsetD[c], pos))
++      PARSE_ERR_CHECK(streamReadS32(data, metadata->alternateOffsetN[c], pos))
++      PARSE_ERR_CHECK(streamReadU32(data, metadata->alternateOffsetD[c], pos))
++    }
++  }
++  // Fill the remaining values by copying those from the first channel.
++  for (int c = channelCount; c < 3; ++c) {
++    metadata->gainMapMinN[c] = metadata->gainMapMinN[0];
++    metadata->gainMapMinD[c] = metadata->gainMapMinD[0];
++    metadata->gainMapMaxN[c] = metadata->gainMapMaxN[0];
++    metadata->gainMapMaxD[c] = metadata->gainMapMaxD[0];
++    metadata->gainMapGammaN[c] = metadata->gainMapGammaN[0];
++    metadata->gainMapGammaD[c] = metadata->gainMapGammaD[0];
++    metadata->baseOffsetN[c] = metadata->baseOffsetN[0];
++    metadata->baseOffsetD[c] = metadata->baseOffsetD[0];
++    metadata->alternateOffsetN[c] = metadata->alternateOffsetN[0];
++    metadata->alternateOffsetD[c] = metadata->alternateOffsetD[0];
++  }
++
++  return Error::Ok;
++}
+diff --git a/libheif/heif_gain_map.h b/libheif/heif_gain_map.h
+new file mode 100644
+index 00000000..e2eb0a00
+--- /dev/null
++++ b/libheif/heif_gain_map.h
+@@ -0,0 +1,34 @@
++/*
++ * HEIF codec.
++ * Copyright (c) 2017 Dirk Farin <dirk.farin@gmail.com>
++ *
++ * This file is part of libheif.
++ *
++ * libheif is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU Lesser General Public License as
++ * published by the Free Software Foundation, either version 3 of
++ * the License, or (at your option) any later version.
++ *
++ * libheif is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with libheif.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef LIBHEIF_HEIF_GAIN_MAP_H
++#define LIBHEIF_HEIF_GAIN_MAP_H
++
++#include "error.h"
++
++#include "libheif/heif_experimental.h"
++
++Error prepare_gain_map_metadata(const heif_gain_map_metadata* gain_map_metadata,
++                                std::vector<uint8_t>& data);
++
++Error parse_gain_map_metadata(const std::vector<uint8_t>& data,
++                              heif_gain_map_metadata* gain_map_metadata);
++
++#endif
+diff --git a/libheif/image-items/image_item.cc b/libheif/image-items/image_item.cc
+index 549880b6..76dbaf2e 100644
+--- a/libheif/image-items/image_item.cc
++++ b/libheif/image-items/image_item.cc
+@@ -386,6 +386,17 @@ Error ImageItem::encode_to_item(HeifContext* ctx,
+   auto infe_box = ctx->get_heif_file()->add_new_infe_box(get_infe_type());
+   heif_item_id image_id = infe_box->get_item_ID();
+   set_id(image_id);
++#if WITH_EXPERIMENTAL_GAIN_MAP
++  if (input_class == heif_image_input_class_gain_map) {
++    if (encoder->plugin->compression_format != heif_compression_HEVC &&
++        encoder->plugin->compression_format != heif_compression_AV1) {
++      return Error(heif_error_Encoder_plugin_error, heif_suberror_Unsupported_codec);
++    }
++    infe_box->set_item_name("GMap");
++    infe_box->set_hidden_item(true);
++  }
++#endif
++
+ 
+   ctx->get_heif_file()->append_iloc_data(image_id, codedImage.bitstream, 0);
+ 
+@@ -646,7 +657,13 @@ void ImageItem::add_color_profile(const std::shared_ptr<HeifPixelImage>& image,
+                                   const heif_color_profile_nclx* target_heif_nclx,
+                                   ImageItem::CodedImageData& inout_codedImage)
+ {
++#if WITH_EXPERIMENTAL_GAIN_MAP
++  if (input_class == heif_image_input_class_normal ||
++      input_class == heif_image_input_class_thumbnail ||
++      input_class == heif_image_input_class_gain_map) {
++#else
+   if (input_class == heif_image_input_class_normal || input_class == heif_image_input_class_thumbnail) {
++#endif
+     auto icc_profile = image->get_color_profile_icc();
+     if (icc_profile) {
+       auto colr = std::make_shared<Box_colr>();
+diff --git a/libheif/image-items/image_item.h b/libheif/image-items/image_item.h
+index 5f0d2b2b..5fdc2fcb 100644
+--- a/libheif/image-items/image_item.h
++++ b/libheif/image-items/image_item.h
+@@ -40,6 +40,9 @@ class ImageMetadata
+ public:
+   heif_item_id item_id;
+   std::string item_type;  // e.g. "Exif"
++#if WITH_EXPERIMENTAL_GAIN_MAP
++  std::string item_name;
++#endif
+   std::string content_type;
+   std::string item_uri_type;
+   std::vector<uint8_t> m_data;
+diff --git a/libheif/plugins/encoder_aom.cc b/libheif/plugins/encoder_aom.cc
+index 9c01a50e..c16ea30b 100644
+--- a/libheif/plugins/encoder_aom.cc
++++ b/libheif/plugins/encoder_aom.cc
+@@ -1073,7 +1073,12 @@ struct heif_error aom_encode_image(void* encoder_raw, const struct heif_image* i
+ 
+   if (nclx &&
+       (input_class == heif_image_input_class_normal ||
++#if WITH_EXPERIMENTAL_GAIN_MAP
++       input_class == heif_image_input_class_thumbnail ||
++       input_class == heif_image_input_class_gain_map)) {
++#else
+        input_class == heif_image_input_class_thumbnail)) {
++#endif
+     aom_error = aom_codec_control(&codec, AV1E_SET_COLOR_PRIMARIES, nclx->color_primaries); CHECK_ERROR
+     aom_error = aom_codec_control(&codec, AV1E_SET_MATRIX_COEFFICIENTS, nclx->matrix_coefficients); CHECK_ERROR;
+     aom_error = aom_codec_control(&codec, AV1E_SET_TRANSFER_CHARACTERISTICS, nclx->transfer_characteristics); CHECK_ERROR;
+diff --git a/libheif/plugins/encoder_kvazaar.cc b/libheif/plugins/encoder_kvazaar.cc
+index 9db79a6c..6acb35b7 100644
+--- a/libheif/plugins/encoder_kvazaar.cc
++++ b/libheif/plugins/encoder_kvazaar.cc
+@@ -567,7 +567,12 @@ static struct heif_error kvazaar_encode_image(void* encoder_raw, const struct he
+ 
+   if (nclx &&
+       (input_class == heif_image_input_class_normal ||
++#if WITH_EXPERIMENTAL_GAIN_MAP
++       input_class == heif_image_input_class_thumbnail ||
++       input_class == heif_image_input_class_gain_map)) {
++#else
+        input_class == heif_image_input_class_thumbnail)) {
++#endif
+     config->vui.colorprim = nclx->color_primaries;
+     config->vui.transfer = nclx->transfer_characteristics;
+     config->vui.colormatrix = nclx->matrix_coefficients;
+diff --git a/libheif/plugins/encoder_rav1e.cc b/libheif/plugins/encoder_rav1e.cc
+index 6a0ca759..7e0fbac8 100644
+--- a/libheif/plugins/encoder_rav1e.cc
++++ b/libheif/plugins/encoder_rav1e.cc
+@@ -550,7 +550,12 @@ struct heif_error rav1e_encode_image(void* encoder_raw, const struct heif_image*
+ 
+   if (nclx &&
+       (input_class == heif_image_input_class_normal ||
++#if WITH_EXPERIMENTAL_GAIN_MAP
++       input_class == heif_image_input_class_thumbnail ||
++       input_class == heif_image_input_class_gain_map)) {
++#else
+        input_class == heif_image_input_class_thumbnail)) {
++#endif
+     if (rav1e_config_set_color_description(rav1eConfig.get(),
+                                            (RaMatrixCoefficients) nclx->matrix_coefficients,
+                                            (RaColorPrimaries) nclx->color_primaries,
+diff --git a/libheif/plugins/encoder_x265.cc b/libheif/plugins/encoder_x265.cc
+index d4e1b016..2544873d 100644
+--- a/libheif/plugins/encoder_x265.cc
++++ b/libheif/plugins/encoder_x265.cc
+@@ -806,7 +806,12 @@ static struct heif_error x265_encode_image(void* encoder_raw, const struct heif_
+ 
+   if (nclx &&
+       (input_class == heif_image_input_class_normal ||
++#if WITH_EXPERIMENTAL_GAIN_MAP
++       input_class == heif_image_input_class_thumbnail ||
++       input_class == heif_image_input_class_gain_map)) {
++#else
+        input_class == heif_image_input_class_thumbnail)) {
++#endif
+ 
+     {
+       std::stringstream sstr;
+-- 
+2.47.1.windows.1
+
