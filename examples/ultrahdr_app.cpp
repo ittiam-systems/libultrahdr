@@ -274,8 +274,8 @@ class UltraHdrAppInput {
                    int gainmapScaleFactor = 1, int gainmapQuality = 95,
                    bool enableMultiChannelGainMap = true, float gamma = 1.0f,
                    bool enableGLES = false, uhdr_enc_preset_t encPreset = UHDR_USAGE_BEST_QUALITY,
-                   float minContentBoost = FLT_MIN, float maxContentBoost = FLT_MAX,
-                   float targetDispPeakBrightness = -1.0f)
+                   uhdr_codec_t outputFormat = UHDR_CODEC_JPG, float minContentBoost = FLT_MIN,
+                   float maxContentBoost = FLT_MAX, float targetDispPeakBrightness = -1.0f)
       : mHdrIntentRawFile(hdrIntentRawFile),
         mSdrIntentRawFile(sdrIntentRawFile),
         mSdrIntentCompressedFile(sdrIntentCompressedFile),
@@ -301,6 +301,7 @@ class UltraHdrAppInput {
         mGamma(gamma),
         mEnableGLES(enableGLES),
         mEncPreset(encPreset),
+        mOutputFormat(outputFormat),
         mMinContentBoost(minContentBoost),
         mMaxContentBoost(maxContentBoost),
         mTargetDispPeakBrightness(targetDispPeakBrightness),
@@ -334,6 +335,7 @@ class UltraHdrAppInput {
         mGamma(1.0f),
         mEnableGLES(enableGLES),
         mEncPreset(UHDR_USAGE_BEST_QUALITY),
+        mOutputFormat(UHDR_CODEC_JPG),
         mMinContentBoost(FLT_MIN),
         mMaxContentBoost(FLT_MAX),
         mTargetDispPeakBrightness(-1.0f),
@@ -422,6 +424,7 @@ class UltraHdrAppInput {
   const float mGamma;
   const bool mEnableGLES;
   const uhdr_enc_preset_t mEncPreset;
+  const uhdr_codec_t mOutputFormat;
   const float mMinContentBoost;
   const float mMaxContentBoost;
   const float mTargetDispPeakBrightness;
@@ -776,6 +779,7 @@ bool UltraHdrAppInput::encode() {
   RET_IF_ERR(uhdr_enc_set_gainmap_scale_factor(handle, mMapDimensionScaleFactor))
   RET_IF_ERR(uhdr_enc_set_gainmap_gamma(handle, mGamma))
   RET_IF_ERR(uhdr_enc_set_preset(handle, mEncPreset))
+  RET_IF_ERR(uhdr_enc_set_output_format(handle, mOutputFormat))
   if (mMinContentBoost != FLT_MIN || mMaxContentBoost != FLT_MAX) {
     RET_IF_ERR(uhdr_enc_set_min_max_content_boost(handle, mMinContentBoost, mMaxContentBoost))
   }
@@ -1467,6 +1471,9 @@ static void usage(const char* name) {
   fprintf(
       stderr,
       "    -D    select encoding preset, optional. [0:real time, 1:best quality (default)]. \n");
+  fprintf(
+      stderr,
+      "    -v    select output encoding format, optional. [0:jpg (default), 1:heif, 2:avif ]. \n");
   fprintf(stderr,
           "    -k    min content boost recommendation, must be in linear scale, optional. [any "
           "positive real number] \n");
@@ -1565,7 +1572,7 @@ static void usage(const char* name) {
 }
 
 int main(int argc, char* argv[]) {
-  char opt_string[] = "p:y:i:g:f:w:h:C:c:t:q:o:O:m:j:e:a:b:z:R:s:M:Q:G:x:u:D:k:K:L:";
+  char opt_string[] = "p:y:i:g:f:w:h:C:c:t:q:o:O:m:j:e:a:b:z:R:s:M:Q:G:x:u:D:k:K:L:v:";
   char *hdr_intent_raw_file = nullptr, *sdr_intent_raw_file = nullptr, *uhdr_file = nullptr,
        *sdr_intent_compressed_file = nullptr, *gainmap_compressed_file = nullptr,
        *gainmap_metadata_cfg_file = nullptr, *output_file = nullptr, *exif_file = nullptr;
@@ -1587,6 +1594,7 @@ int main(int argc, char* argv[]) {
   float gamma = 1.0f;
   bool enable_gles = false;
   uhdr_enc_preset_t enc_preset = UHDR_USAGE_BEST_QUALITY;
+  uhdr_codec_t out_format = UHDR_CODEC_JPG;
   float min_content_boost = FLT_MIN;
   float max_content_boost = FLT_MAX;
   float target_disp_peak_brightness = -1.0f;
@@ -1678,6 +1686,9 @@ int main(int argc, char* argv[]) {
       case 'D':
         enc_preset = static_cast<uhdr_enc_preset_t>(atoi(optarg_s));
         break;
+      case 'v':
+        out_format = static_cast<uhdr_codec_t>(atoi(optarg_s));
+        break;
       case 'k':
         min_content_boost = (float)atof(optarg_s);
         break;
@@ -1715,7 +1726,7 @@ int main(int argc, char* argv[]) {
         output_file ? output_file : "out.jpeg", width, height, hdr_cf, sdr_cf, hdr_cg, sdr_cg,
         hdr_tf, quality, out_tf, out_cf, use_full_range_color_hdr, gainmap_scale_factor,
         gainmap_compression_quality, use_multi_channel_gainmap, gamma, enable_gles, enc_preset,
-        min_content_boost, max_content_boost, target_disp_peak_brightness);
+        out_format, min_content_boost, max_content_boost, target_disp_peak_brightness);
     if (!appInput.encode()) return -1;
     if (compute_psnr == 1) {
       if (!appInput.decode()) return -1;
