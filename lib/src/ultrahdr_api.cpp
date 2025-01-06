@@ -22,7 +22,10 @@
 #include "ultrahdr/gainmapmath.h"
 #include "ultrahdr/editorhelper.h"
 #include "ultrahdr/jpegr.h"
-#include "ultrahdr/jpegrutils.h"
+#ifdef UHDR_ENABLE_HEIF
+#include "ultrahdr/heifr.h"
+#include "ultrahdr/gainmapmetadata.h"
+#endif
 
 #include "image_io/base/data_segment_data_source.h"
 #include "image_io/jpeg/jpeg_info.h"
@@ -1153,12 +1156,25 @@ uhdr_error_info_t uhdr_enc_set_output_format(uhdr_codec_private_t* enc, uhdr_cod
     status.error_code = UHDR_CODEC_INVALID_PARAM;
     status.has_detail = 1;
     snprintf(status.detail, sizeof status.detail, "received nullptr for uhdr codec instance");
-  } else if (media_type != UHDR_CODEC_JPG) {
+  }
+#ifdef UHDR_ENABLE_HEIF
+  else if (media_type != UHDR_CODEC_JPG && media_type != UHDR_CODEC_AVIF &&
+           media_type != UHDR_CODEC_HEIF) {
+    status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+    status.has_detail = 1;
+    snprintf(status.detail, sizeof status.detail,
+             "invalid output format %d, expects one of {UHDR_CODEC_JPG, UHDR_CODEC_AVIF, "
+             "UHDR_CODEC_HEIF}",
+             media_type);
+  }
+#else
+  else if (media_type != UHDR_CODEC_JPG) {
     status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
     status.has_detail = 1;
     snprintf(status.detail, sizeof status.detail,
              "invalid output format %d, expects {UHDR_CODEC_JPG}", media_type);
   }
+#endif
   if (status.error_code != UHDR_CODEC_OK) return status;
 
   uhdr_encoder_private* handle = dynamic_cast<uhdr_encoder_private*>(enc);
@@ -1240,13 +1256,12 @@ uhdr_error_info_t uhdr_encode(uhdr_codec_private_t* enc) {
     }
   }
 
+  uhdr_mem_block_t exif{};
+  if (handle->m_exif.size() > 0) {
+    exif.data = handle->m_exif.data();
+    exif.capacity = exif.data_sz = handle->m_exif.size();
+  }
   if (handle->m_output_format == UHDR_CODEC_JPG) {
-    uhdr_mem_block_t exif{};
-    if (handle->m_exif.size() > 0) {
-      exif.data = handle->m_exif.data();
-      exif.capacity = exif.data_sz = handle->m_exif.size();
-    }
-
     ultrahdr::JpegR jpegr(nullptr, handle->m_gainmap_scale_factor,
                           handle->m_quality.find(UHDR_GAIN_MAP_IMG)->second,
                           handle->m_use_multi_channel_gainmap, handle->m_gamma,
@@ -1310,6 +1325,70 @@ uhdr_error_info_t uhdr_encode(uhdr_codec_private_t* enc) {
       snprintf(status.detail, sizeof status.detail,
                "resources required for uhdr_encode() operation are not present");
     }
+  }
+#ifdef UHDR_ENABLE_HEIF
+  else if (handle->m_output_format == UHDR_CODEC_AVIF ||
+           handle->m_output_format == UHDR_CODEC_HEIF) {
+    ultrahdr::HeifR heifr(
+        nullptr, handle->m_gainmap_scale_factor, handle->m_quality.find(UHDR_GAIN_MAP_IMG)->second,
+        handle->m_use_multi_channel_gainmap, handle->m_gamma, handle->m_enc_preset,
+        handle->m_min_content_boost, handle->m_max_content_boost,
+        handle->m_target_disp_max_brightness, handle->m_output_format);
+    if (handle->m_compressed_images.find(UHDR_BASE_IMG) != handle->m_compressed_images.end() &&
+        handle->m_compressed_images.find(UHDR_GAIN_MAP_IMG) != handle->m_compressed_images.end()) {
+      status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+      status.has_detail = 1;
+      snprintf(status.detail, sizeof status.detail,
+               "heif/avif encoding is supported only with raw intents");
+    } else if (handle->m_raw_images.find(UHDR_HDR_IMG) != handle->m_raw_images.end()) {
+      auto& hdr_raw_entry = handle->m_raw_images.find(UHDR_HDR_IMG)->second;
+
+      size_t size = (std::max)((64u * 1024), hdr_raw_entry->w * hdr_raw_entry->h * 3 * 2);
+      handle->m_compressed_output_buffer = std::make_unique<ultrahdr::uhdr_compressed_image_ext_t>(
+          UHDR_CG_UNSPECIFIED, UHDR_CT_UNSPECIFIED, UHDR_CR_UNSPECIFIED, size);
+
+      if (handle->m_compressed_images.find(UHDR_SDR_IMG) == handle->m_compressed_images.end() &&
+          handle->m_raw_images.find(UHDR_SDR_IMG) == handle->m_raw_images.end()) {
+        // api - 0
+        status = heifr.encodeHEIFR(hdr_raw_entry.get(), handle->m_compressed_output_buffer.get(),
+                                   handle->m_quality.find(UHDR_BASE_IMG)->second,
+                                   handle->m_exif.size() > 0 ? &exif : nullptr);
+      } else if (handle->m_compressed_images.find(UHDR_SDR_IMG) !=
+                     handle->m_compressed_images.end() &&
+                 handle->m_raw_images.find(UHDR_SDR_IMG) == handle->m_raw_images.end()) {
+        status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail,
+                 "heif/avif encoding is supported only with raw intents");
+      } else if (handle->m_raw_images.find(UHDR_SDR_IMG) != handle->m_raw_images.end()) {
+        auto& sdr_raw_entry = handle->m_raw_images.find(UHDR_SDR_IMG)->second;
+
+        if (handle->m_compressed_images.find(UHDR_SDR_IMG) == handle->m_compressed_images.end()) {
+          // api - 1
+          status = heifr.encodeHEIFR(hdr_raw_entry.get(), sdr_raw_entry.get(),
+                                     handle->m_compressed_output_buffer.get(),
+                                     handle->m_quality.find(UHDR_BASE_IMG)->second,
+                                     handle->m_exif.size() > 0 ? &exif : nullptr);
+        } else {
+          status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail,
+                   "heif/avif encoding is supported only with raw intents");
+        }
+      }
+    } else {
+      status.error_code = UHDR_CODEC_INVALID_OPERATION;
+      status.has_detail = 1;
+      snprintf(status.detail, sizeof status.detail,
+               "resources required for uhdr_encode() operation are not present");
+    }
+  }
+#endif
+  else {
+    status.error_code = UHDR_CODEC_INVALID_PARAM;
+    status.has_detail = 1;
+    snprintf(status.detail, sizeof status.detail, "unsupported output format %d",
+             handle->m_output_format);
   }
 
   return status;
@@ -1572,16 +1651,113 @@ uhdr_error_info_t uhdr_dec_probe(uhdr_codec_private_t* dec) {
     ultrahdr::jpegr_info_struct jpegr_info;
     jpegr_info.primaryImgInfo = &primary_image;
     jpegr_info.gainmapImgInfo = &gainmap_image;
-
-    ultrahdr::JpegR jpegr;
-    status = jpegr.getJPEGRInfo(handle->m_uhdr_compressed_img.get(), &jpegr_info);
-    if (status.error_code != UHDR_CODEC_OK) return status;
-
     ultrahdr::uhdr_gainmap_metadata_ext_t metadata;
-    status = jpegr.parseGainMapMetadata(gainmap_image.isoData.data(), gainmap_image.isoData.size(),
-                                        gainmap_image.xmpData.data(), gainmap_image.xmpData.size(),
-                                        &metadata);
-    if (status.error_code != UHDR_CODEC_OK) return status;
+    ultrahdr::uhdr_compressed_image_ext_t* img = handle->m_uhdr_compressed_img.get();
+
+    if (img->data_sz > 3 && memcmp(img->data, "\377\330\377", 3) == 0) {
+      ultrahdr::JpegR jpegr;
+      status = jpegr.getJPEGRInfo(img, &jpegr_info);
+      if (status.error_code != UHDR_CODEC_OK) return status;
+
+      status = jpegr.parseGainMapMetadata(
+          gainmap_image.isoData.data(), gainmap_image.isoData.size(), gainmap_image.xmpData.data(),
+          gainmap_image.xmpData.size(), &metadata);
+      if (status.error_code != UHDR_CODEC_OK) return status;
+      handle->m_is_jpeg = true;
+    }
+#ifdef UHDR_ENABLE_HEIF
+    else if (img->data_sz >= 12 &&
+             heif_filetype_yes_supported ==
+                 heif_check_filetype(static_cast<const uint8_t*>(img->data), img->data_sz)) {
+      struct heif_image_handle* base_handle = nullptr;
+      struct heif_image_handle* gainmap_handle = nullptr;
+      enum heif_colorspace out_colorspace;
+      enum heif_chroma out_chroma;
+      heif_context* ctx = heif_context_alloc();
+
+      if (!ctx) {
+        status.error_code = UHDR_CODEC_MEM_ERROR;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail, "failed to allocate heif context");
+        return status;
+      }
+      HEIF_ERR_CHECK(heif_context_read_from_memory_without_copy(
+          ctx, static_cast<const uint8_t*>(img->data), img->data_sz, nullptr))
+      HEIF_ERR_CHECK(heif_context_get_primary_image_handle(ctx, &base_handle))
+      HEIF_ERR_CHECK(heif_image_handle_get_gain_map_image_handle(base_handle, &gainmap_handle))
+      status = heif_get_gainmap_metadata(base_handle, &metadata);
+      if (status.error_code != UHDR_CODEC_OK) goto CleanUp;
+
+      primary_image.width = heif_image_handle_get_width(base_handle);
+      primary_image.height = heif_image_handle_get_height(base_handle);
+      HEIF_ERR_CHECK(heif_image_handle_get_preferred_decoding_colorspace(
+          base_handle, &out_colorspace, &out_chroma))
+      if (out_colorspace == heif_colorspace_YCbCr || out_colorspace == heif_colorspace_RGB) {
+        primary_image.numComponents = 3;
+        if (out_colorspace == heif_colorspace_YCbCr &&
+            (out_chroma != heif_chroma_420 && out_chroma != heif_chroma_422 &&
+             out_chroma != heif_chroma_444)) {
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "unrecognized primary image chroma format");
+          goto CleanUp;
+        }
+      } else {
+        status.error_code = UHDR_CODEC_INVALID_PARAM;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail, "unrecognized primary image color space");
+        goto CleanUp;
+      }
+      HEIF_ERR_CHECK(get_image_metadata(base_handle, primary_image))
+
+      gainmap_image.width = heif_image_handle_get_width(gainmap_handle);
+      gainmap_image.height = heif_image_handle_get_height(gainmap_handle);
+      HEIF_ERR_CHECK(heif_image_handle_get_preferred_decoding_colorspace(
+          gainmap_handle, &out_colorspace, &out_chroma))
+      if (out_colorspace == heif_colorspace_YCbCr || out_colorspace == heif_colorspace_RGB) {
+        gainmap_image.numComponents = 3;
+        if (out_colorspace == heif_colorspace_YCbCr &&
+            (out_chroma != heif_chroma_420 && out_chroma != heif_chroma_422 &&
+             out_chroma != heif_chroma_444)) {
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "unrecognized gainmap image chroma format");
+          goto CleanUp;
+        }
+      } else if (out_colorspace == heif_colorspace_monochrome) {
+        gainmap_image.numComponents = 1;
+        if (out_chroma != heif_chroma_monochrome) {
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "unrecognized gainmap image chroma format");
+          goto CleanUp;
+        }
+      } else {
+        status.error_code = UHDR_CODEC_INVALID_PARAM;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail, "unrecognized gainmap image color space");
+        goto CleanUp;
+      }
+      HEIF_ERR_CHECK(get_image_metadata(gainmap_handle, gainmap_image))
+      handle->m_is_jpeg = false;
+
+    CleanUp:
+      if (gainmap_handle) heif_image_handle_release(gainmap_handle);
+      gainmap_handle = nullptr;
+      if (base_handle) heif_image_handle_release(base_handle);
+      base_handle = nullptr;
+      if (ctx) heif_context_free(ctx);
+      ctx = nullptr;
+      if (status.error_code != UHDR_CODEC_OK) return status;
+    }
+#endif
+    else {
+      status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+      status.has_detail = 1;
+      snprintf(status.detail, sizeof status.detail,
+               "unrecognized file format, unable to decode file");
+      return status;
+    }
     std::copy(metadata.max_content_boost, metadata.max_content_boost + 3,
               handle->m_metadata.max_content_boost);
     std::copy(metadata.min_content_boost, metadata.min_content_boost + 3,
@@ -1776,8 +1952,8 @@ uhdr_error_info_t uhdr_decode(uhdr_codec_private_t* dec) {
       UHDR_CG_UNSPECIFIED, UHDR_CT_UNSPECIFIED, UHDR_CR_UNSPECIFIED, handle->m_gainmap_wd,
       handle->m_gainmap_ht, 1);
 
+  void* uhdrGLESCtxt = nullptr;
 #ifdef UHDR_ENABLE_GLES
-  ultrahdr::uhdr_opengl_ctxt_t* uhdrGLESCtxt = nullptr;
   if (handle->m_enable_gles &&
       (handle->m_output_ct != UHDR_CT_SRGB || handle->m_effects.size() > 0)) {
     handle->m_uhdr_gl_ctxt.init_opengl_ctxt();
@@ -1785,15 +1961,24 @@ uhdr_error_info_t uhdr_decode(uhdr_codec_private_t* dec) {
     if (status.error_code != UHDR_CODEC_OK) return status;
     uhdrGLESCtxt = &handle->m_uhdr_gl_ctxt;
   }
-  ultrahdr::JpegR jpegr(uhdrGLESCtxt);
-#else
-  ultrahdr::JpegR jpegr;
 #endif
 
-  status =
-      jpegr.decodeJPEGR(handle->m_uhdr_compressed_img.get(), handle->m_decoded_img_buffer.get(),
-                        handle->m_output_max_disp_boost, handle->m_output_ct, handle->m_output_fmt,
-                        handle->m_gainmap_img_buffer.get(), nullptr);
+  if (handle->m_is_jpeg) {
+    ultrahdr::JpegR jpegr(uhdrGLESCtxt);
+    status =
+        jpegr.decodeJPEGR(handle->m_uhdr_compressed_img.get(), handle->m_decoded_img_buffer.get(),
+                          handle->m_output_max_disp_boost, handle->m_output_ct,
+                          handle->m_output_fmt, handle->m_gainmap_img_buffer.get(), nullptr);
+  }
+#ifdef UHDR_ENABLE_HEIF
+  else {
+    ultrahdr::HeifR heifr(uhdrGLESCtxt);
+    status =
+        heifr.decodeHEIFR(handle->m_uhdr_compressed_img.get(), handle->m_decoded_img_buffer.get(),
+                          handle->m_output_max_disp_boost, handle->m_output_ct,
+                          handle->m_output_fmt, handle->m_gainmap_img_buffer.get(), nullptr);
+  }
+#endif
 
   if (status.error_code == UHDR_CODEC_OK && dec->m_effects.size() != 0) {
     status = ultrahdr::apply_effects(handle);
@@ -1863,6 +2048,7 @@ void uhdr_reset_decoder(uhdr_codec_private_t* dec) {
 
     // ready to be configured
     handle->m_probed = false;
+    handle->m_is_jpeg = true;
     handle->m_decoded_img_buffer.reset();
     handle->m_gainmap_img_buffer.reset();
     handle->m_img_wd = 0;
