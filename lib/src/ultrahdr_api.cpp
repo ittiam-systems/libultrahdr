@@ -24,6 +24,7 @@
 #include "ultrahdr/jpegr.h"
 #ifdef UHDR_ENABLE_HEIF
 #include "ultrahdr/heifr.h"
+#include "ultrahdr/gainmapmetadata.h"
 #endif
 
 #include "image_io/base/data_segment_data_source.h"
@@ -1650,16 +1651,115 @@ uhdr_error_info_t uhdr_dec_probe(uhdr_codec_private_t* dec) {
     ultrahdr::jpegr_info_struct jpegr_info;
     jpegr_info.primaryImgInfo = &primary_image;
     jpegr_info.gainmapImgInfo = &gainmap_image;
-
-    ultrahdr::JpegR jpegr;
-    status = jpegr.getJPEGRInfo(handle->m_uhdr_compressed_img.get(), &jpegr_info);
-    if (status.error_code != UHDR_CODEC_OK) return status;
-
     ultrahdr::uhdr_gainmap_metadata_ext_t metadata;
-    status = jpegr.parseGainMapMetadata(gainmap_image.isoData.data(), gainmap_image.isoData.size(),
-                                        gainmap_image.xmpData.data(), gainmap_image.xmpData.size(),
-                                        &metadata);
-    if (status.error_code != UHDR_CODEC_OK) return status;
+    ultrahdr::uhdr_compressed_image_ext_t* img = handle->m_uhdr_compressed_img.get();
+
+    if (img->data_sz > 3 && memcmp(img->data, "\377\330\377", 3) == 0) {
+      ultrahdr::JpegR jpegr;
+      status = jpegr.getJPEGRInfo(img, &jpegr_info);
+      if (status.error_code != UHDR_CODEC_OK) return status;
+
+      status = jpegr.parseGainMapMetadata(
+          gainmap_image.isoData.data(), gainmap_image.isoData.size(), gainmap_image.xmpData.data(),
+          gainmap_image.xmpData.size(), &metadata);
+      if (status.error_code != UHDR_CODEC_OK) return status;
+      handle->m_is_jpeg = true;
+    }
+#ifdef UHDR_ENABLE_HEIF
+    else if (img->data_sz >= 12 &&
+             heif_filetype_yes_supported ==
+                 heif_check_filetype(static_cast<const uint8_t*>(img->data), img->data_sz)) {
+      struct heif_image_handle* base_handle = nullptr;
+      struct heif_image_handle* gainmap_handle = nullptr;
+      heif_gain_map_metadata heif_metadata;
+      enum heif_colorspace out_colorspace;
+      enum heif_chroma out_chroma;
+      heif_context* ctx = heif_context_alloc();
+
+      if (!ctx) {
+        status.error_code = UHDR_CODEC_MEM_ERROR;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail, "failed to allocate heif context");
+        return status;
+      }
+      HEIF_ERR_CHECK(heif_context_read_from_memory_without_copy(
+          ctx, static_cast<const uint8_t*>(img->data), img->data_sz, nullptr))
+      HEIF_ERR_CHECK(heif_context_get_primary_image_handle(ctx, &base_handle))
+      HEIF_ERR_CHECK(heif_context_get_gain_map_image_handle(ctx, &gainmap_handle))
+      HEIF_ERR_CHECK(heif_context_get_gain_map_metadata(ctx, &heif_metadata))
+      status = map_heif_gainmap_metadata_uhdr_metadata(&heif_metadata, &metadata);
+      if (status.error_code != UHDR_CODEC_OK) goto CleanUp;
+
+      primary_image.width = heif_image_handle_get_width(base_handle);
+      primary_image.height = heif_image_handle_get_height(base_handle);
+      HEIF_ERR_CHECK(heif_image_handle_get_preferred_decoding_colorspace(
+          base_handle, &out_colorspace, &out_chroma))
+      if (out_colorspace == heif_colorspace_YCbCr || out_colorspace == heif_colorspace_RGB) {
+        primary_image.numComponents = 3;
+        if (out_colorspace == heif_colorspace_YCbCr &&
+            (out_chroma != heif_chroma_420 && out_chroma != heif_chroma_422 &&
+             out_chroma != heif_chroma_444)) {
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "unrecognized primary image chroma format");
+          goto CleanUp;
+        }
+      } else {
+        status.error_code = UHDR_CODEC_INVALID_PARAM;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail, "unrecognized primary image color space");
+        goto CleanUp;
+      }
+      HEIF_ERR_CHECK(get_image_metadata(base_handle, primary_image))
+
+      gainmap_image.width = heif_image_handle_get_width(gainmap_handle);
+      gainmap_image.height = heif_image_handle_get_height(gainmap_handle);
+      HEIF_ERR_CHECK(heif_image_handle_get_preferred_decoding_colorspace(
+          gainmap_handle, &out_colorspace, &out_chroma))
+      if (out_colorspace == heif_colorspace_YCbCr || out_colorspace == heif_colorspace_RGB) {
+        gainmap_image.numComponents = 3;
+        if (out_colorspace == heif_colorspace_YCbCr &&
+            (out_chroma != heif_chroma_420 && out_chroma != heif_chroma_422 &&
+             out_chroma != heif_chroma_444)) {
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "unrecognized gainmap image chroma format");
+          goto CleanUp;
+        }
+      } else if (out_colorspace == heif_colorspace_monochrome) {
+        gainmap_image.numComponents = 1;
+        if (out_chroma != heif_chroma_monochrome) {
+          status.error_code = UHDR_CODEC_INVALID_PARAM;
+          status.has_detail = 1;
+          snprintf(status.detail, sizeof status.detail, "unrecognized gainmap image chroma format");
+          goto CleanUp;
+        }
+      } else {
+        status.error_code = UHDR_CODEC_INVALID_PARAM;
+        status.has_detail = 1;
+        snprintf(status.detail, sizeof status.detail, "unrecognized gainmap image color space");
+        goto CleanUp;
+      }
+      HEIF_ERR_CHECK(get_image_metadata(gainmap_handle, gainmap_image))
+      handle->m_is_jpeg = false;
+
+    CleanUp:
+      if (gainmap_handle) heif_image_handle_release(gainmap_handle);
+      gainmap_handle = nullptr;
+      if (base_handle) heif_image_handle_release(base_handle);
+      base_handle = nullptr;
+      if (ctx) heif_context_free(ctx);
+      ctx = nullptr;
+      if (status.error_code != UHDR_CODEC_OK) return status;
+    }
+#endif
+    else {
+      status.error_code = UHDR_CODEC_UNSUPPORTED_FEATURE;
+      status.has_detail = 1;
+      snprintf(status.detail, sizeof status.detail,
+               "unrecognized file format, unable to decode file");
+      return status;
+    }
     std::copy(metadata.max_content_boost, metadata.max_content_boost + 3,
               handle->m_metadata.max_content_boost);
     std::copy(metadata.min_content_boost, metadata.min_content_boost + 3,
@@ -1854,8 +1954,8 @@ uhdr_error_info_t uhdr_decode(uhdr_codec_private_t* dec) {
       UHDR_CG_UNSPECIFIED, UHDR_CT_UNSPECIFIED, UHDR_CR_UNSPECIFIED, handle->m_gainmap_wd,
       handle->m_gainmap_ht, 1);
 
+  void* uhdrGLESCtxt = nullptr;
 #ifdef UHDR_ENABLE_GLES
-  ultrahdr::uhdr_opengl_ctxt_t* uhdrGLESCtxt = nullptr;
   if (handle->m_enable_gles &&
       (handle->m_output_ct != UHDR_CT_SRGB || handle->m_effects.size() > 0)) {
     handle->m_uhdr_gl_ctxt.init_opengl_ctxt();
@@ -1863,15 +1963,24 @@ uhdr_error_info_t uhdr_decode(uhdr_codec_private_t* dec) {
     if (status.error_code != UHDR_CODEC_OK) return status;
     uhdrGLESCtxt = &handle->m_uhdr_gl_ctxt;
   }
-  ultrahdr::JpegR jpegr(uhdrGLESCtxt);
-#else
-  ultrahdr::JpegR jpegr;
 #endif
 
-  status =
-      jpegr.decodeJPEGR(handle->m_uhdr_compressed_img.get(), handle->m_decoded_img_buffer.get(),
-                        handle->m_output_max_disp_boost, handle->m_output_ct, handle->m_output_fmt,
-                        handle->m_gainmap_img_buffer.get(), nullptr);
+  if (handle->m_is_jpeg) {
+    ultrahdr::JpegR jpegr(uhdrGLESCtxt);
+    status =
+        jpegr.decodeJPEGR(handle->m_uhdr_compressed_img.get(), handle->m_decoded_img_buffer.get(),
+                          handle->m_output_max_disp_boost, handle->m_output_ct,
+                          handle->m_output_fmt, handle->m_gainmap_img_buffer.get(), nullptr);
+  }
+#ifdef UHDR_ENABLE_HEIF
+  else {
+    ultrahdr::HeifR heifr(uhdrGLESCtxt);
+    status =
+        heifr.decodeHEIFR(handle->m_uhdr_compressed_img.get(), handle->m_decoded_img_buffer.get(),
+                          handle->m_output_max_disp_boost, handle->m_output_ct,
+                          handle->m_output_fmt, handle->m_gainmap_img_buffer.get(), nullptr);
+  }
+#endif
 
   if (status.error_code == UHDR_CODEC_OK && dec->m_effects.size() != 0) {
     status = ultrahdr::apply_effects(handle);
@@ -1941,6 +2050,7 @@ void uhdr_reset_decoder(uhdr_codec_private_t* dec) {
 
     // ready to be configured
     handle->m_probed = false;
+    handle->m_is_jpeg = true;
     handle->m_decoded_img_buffer.reset();
     handle->m_gainmap_img_buffer.reset();
     handle->m_img_wd = 0;

@@ -16,22 +16,13 @@
 
 #ifdef UHDR_ENABLE_HEIF
 
+#include <map>
+
 #include "ultrahdr/heifr.h"
 #include "ultrahdr/gainmapmath.h"
 #include "ultrahdr/gainmapmetadata.h"
 
 namespace ultrahdr {
-
-#define HEIF_ERR_CHECK(x)                                               \
-  {                                                                     \
-    heif_error err = (x);                                               \
-    if (err.code != heif_error_Ok) {                                    \
-      status.error_code = UHDR_CODEC_ERROR;                             \
-      status.has_detail = 1;                                            \
-      snprintf(status.detail, sizeof status.detail, "%s", err.message); \
-      goto CleanUp;                                                     \
-    }                                                                   \
-  }
 
 class MemoryWriter {
  public:
@@ -91,45 +82,73 @@ static struct heif_error fill_img_plane(heif_image* img, heif_channel channel, v
   return err;
 }
 
-static heif_color_primaries map_cg_cicp_primaries(uhdr_color_gamut_t gamut) {
-  heif_color_primaries color_primaries = heif_color_primaries_unspecified;
-  if (gamut == UHDR_CG_BT_709) {
-    color_primaries = heif_color_primaries_ITU_R_BT_709_5;
-  } else if (gamut == UHDR_CG_DISPLAY_P3) {
-    color_primaries = heif_color_primaries_SMPTE_EG_432_1;
-  } else if (gamut == UHDR_CG_BT_2100) {
-    color_primaries = heif_color_primaries_ITU_R_BT_2020_2_and_2100_0;
+static struct heif_error copy_img_plane(heif_image* img, heif_channel channel, void* dstBuffer,
+                                        int width, int height, int dstRowStride, int bpp) {
+  if (channel != heif_channel_interleaved && channel != heif_channel_Y &&
+      channel != heif_channel_Cb && channel != heif_channel_Cr) {
+    return {heif_error_Invalid_input, heif_suberror_Nonexisting_image_channel_referenced,
+            "supports copying only heif_channel_interleaved"};
   }
-  return color_primaries;
+
+  int srcStride;
+  uint8_t* srcBuffer = heif_image_get_plane(img, channel, &srcStride);
+  uint8_t* srcRow = static_cast<uint8_t*>(srcBuffer);
+  uint8_t* dstRow = static_cast<uint8_t*>(dstBuffer);
+
+  for (int y = 0; y < height; y++) {
+    memcpy(dstRow, srcRow, width * bpp);
+    srcRow += srcStride;
+    dstRow += dstRowStride;
+  }
+  return {heif_error_Ok, heif_suberror_Unspecified, nullptr};
 }
 
-static heif_transfer_characteristics map_ct_cicp_transfer_characteristics(
-    uhdr_color_transfer_t tf) {
-  heif_transfer_characteristics transfer_characteristics = heif_transfer_characteristic_unspecified;
-  if (tf == UHDR_CT_SRGB) {
-    transfer_characteristics = heif_transfer_characteristic_ITU_R_BT_709_5;
-  } else if (tf == UHDR_CT_LINEAR) {
-    transfer_characteristics = heif_transfer_characteristic_linear;
-  } else if (tf == UHDR_CT_PQ) {
-    transfer_characteristics = heif_transfer_characteristic_ITU_R_BT_2100_0_PQ;
-  } else if (tf == UHDR_CT_HLG) {
-    transfer_characteristics = heif_transfer_characteristic_ITU_R_BT_2100_0_HLG;
+/*!\brief map of uhdr color primaries and libheif primaries */
+std::map<uhdr_color_gamut_t, heif_color_primaries> map_primaries = {
+    {UHDR_CG_BT_709, heif_color_primaries_ITU_R_BT_709_5},
+    {UHDR_CG_DISPLAY_P3, heif_color_primaries_SMPTE_EG_432_1},
+    {UHDR_CG_BT_2100, heif_color_primaries_ITU_R_BT_2020_2_and_2100_0},
+    {(uhdr_color_gamut_t)UHDR_CG_BT_601, heif_color_primaries_ITU_R_BT_601_6},
+    {UHDR_CG_UNSPECIFIED, heif_color_primaries_unspecified},
+};
+
+/*!\brief map of uhdr color transfer and libheif transfer characteristics */
+std::map<uhdr_color_transfer_t, heif_transfer_characteristics> map_transfer = {
+    {UHDR_CT_LINEAR, heif_transfer_characteristic_linear},
+    {UHDR_CT_PQ, heif_transfer_characteristic_ITU_R_BT_2100_0_PQ},
+    {UHDR_CT_HLG, heif_transfer_characteristic_ITU_R_BT_2100_0_HLG},
+    {UHDR_CT_SRGB, heif_transfer_characteristic_ITU_R_BT_709_5},
+    {UHDR_CT_UNSPECIFIED, heif_transfer_characteristic_unspecified},
+};
+
+/*!\brief map of uhdr color gamut and libheif matrix coefficients */
+std::map<uhdr_color_gamut_t, heif_matrix_coefficients> map_matrix = {
+    {UHDR_CG_BT_709, heif_matrix_coefficients_ITU_R_BT_709_5},
+    {UHDR_CG_DISPLAY_P3, heif_matrix_coefficients_chromaticity_derived_non_constant_luminance},
+    {UHDR_CG_BT_2100, heif_matrix_coefficients_ITU_R_BT_2020_2_non_constant_luminance},
+    {(uhdr_color_gamut_t)UHDR_CG_BT_601, heif_matrix_coefficients_ITU_R_BT_601_6},
+    {UHDR_CG_UNSPECIFIED, heif_matrix_coefficients_unspecified},
+};
+
+static uhdr_color_gamut_t map_primaries_inverse(heif_color_primaries primaries) {
+  for (const auto& [key, value] : map_primaries) {
+    if (value == primaries) return key;
   }
-  return transfer_characteristics;
+  return UHDR_CG_UNSPECIFIED;
 }
 
-static heif_matrix_coefficients map_cg_cicp_matrix_coefficients(uhdr_color_gamut_t gamut) {
-  heif_matrix_coefficients matrix_coefficients = heif_matrix_coefficients_unspecified;
-  if (gamut == UHDR_CG_BT_709) {
-    matrix_coefficients = heif_matrix_coefficients_ITU_R_BT_709_5;
-  } else if (gamut == UHDR_CG_DISPLAY_P3) {
-    matrix_coefficients = heif_matrix_coefficients_chromaticity_derived_non_constant_luminance;
-  } else if (gamut == UHDR_CG_BT_2100) {
-    matrix_coefficients = heif_matrix_coefficients_ITU_R_BT_2020_2_non_constant_luminance;
-  } else if (gamut == UHDR_CG_BT_601) {
-    matrix_coefficients = heif_matrix_coefficients_ITU_R_BT_601_6;
+static uhdr_color_transfer_t map_transfer_inverse(heif_transfer_characteristics transfer) {
+  for (const auto& [key, value] : map_transfer) {
+    if (value == transfer) return key;
   }
-  return matrix_coefficients;
+  return UHDR_CT_UNSPECIFIED;
+}
+
+static uhdr_color_gamut_t map_matrix_inverse(heif_matrix_coefficients matrix) {
+  for (const auto& [key, value] : map_matrix) {
+    if (value == matrix) return key;
+  }
+  return UHDR_CG_UNSPECIFIED;
 }
 
 static heif_error map_fmt_to_heif_chroma_vars(uhdr_img_fmt_t fmt, unsigned int w, unsigned h,
@@ -157,6 +176,46 @@ static heif_error map_fmt_to_heif_chroma_vars(uhdr_img_fmt_t fmt, unsigned int w
   return {heif_error_Ok, heif_suberror_Unspecified, nullptr};
 }
 
+static heif_error map_heif_chroma_vars_to_fmt(enum heif_colorspace colorspace,
+                                              enum heif_chroma chroma_fmt, uhdr_img_fmt_t& fmt) {
+  if (colorspace == heif_colorspace_YCbCr) {
+    if (chroma_fmt == heif_chroma_420) {
+      fmt = UHDR_IMG_FMT_12bppYCbCr420;
+    } else if (chroma_fmt == heif_chroma_422) {
+      fmt = UHDR_IMG_FMT_16bppYCbCr422;
+    } else if (chroma_fmt == heif_chroma_444) {
+      fmt = UHDR_IMG_FMT_24bppYCbCr444;
+    } else {
+      heif_error status;
+      status.code = heif_error_Unsupported_feature;
+      status.subcode = heif_suberror_Unsupported_color_conversion;
+      status.message = "mapping heif image format to uhdr img format failed";
+      return status;
+    }
+  } else if (colorspace == heif_colorspace_monochrome) {
+    fmt = UHDR_IMG_FMT_8bppYCbCr400;
+  } else if (colorspace == heif_colorspace_RGB) {
+    if (chroma_fmt == heif_chroma_interleaved_RGB) {
+      fmt = UHDR_IMG_FMT_24bppRGB888;
+    } else if (chroma_fmt == heif_chroma_interleaved_RGBA) {
+      fmt = UHDR_IMG_FMT_32bppRGBA8888;
+    } else {
+      heif_error status;
+      status.code = heif_error_Unsupported_feature;
+      status.subcode = heif_suberror_Unsupported_color_conversion;
+      status.message = "mapping heif image format to uhdr img format failed";
+      return status;
+    }
+  } else {
+    heif_error status;
+    status.code = heif_error_Unsupported_feature;
+    status.subcode = heif_suberror_Unsupported_color_conversion;
+    status.message = "mapping heif image format to uhdr img format failed";
+    return status;
+  }
+  return {heif_error_Ok, heif_suberror_Unspecified, nullptr};
+}
+
 static heif_error set_internal_color_format(heif_encoder* encoder, enum heif_chroma heif_img_fmt) {
   struct heif_error err {
     heif_error_Ok, heif_suberror_Unspecified, nullptr
@@ -179,6 +238,63 @@ static heif_error set_internal_color_format(heif_encoder* encoder, enum heif_chr
       break;
   }
   return err;
+}
+
+heif_error get_image_metadata(struct heif_image_handle* handle, ultrahdr::jpeg_info_struct& image) {
+  struct heif_error err {
+    heif_error_Ok, heif_suberror_Unspecified, nullptr
+  };
+  int num_metadata = heif_image_handle_get_number_of_metadata_blocks(handle, nullptr);
+  if (num_metadata > 0) {
+    std::vector<heif_item_id> ids(num_metadata);
+    heif_image_handle_get_list_of_metadata_block_IDs(handle, nullptr, ids.data(), num_metadata);
+    for (int n = 0; n < num_metadata; n++) {
+      // check whether metadata block is XMP
+      std::string itemtype = heif_image_handle_get_metadata_type(handle, ids[n]);
+      std::string contenttype = heif_image_handle_get_metadata_content_type(handle, ids[n]);
+      if (contenttype == "application/rdf+xml") {
+        // read XMP data to memory array
+        size_t xmpSize = heif_image_handle_get_metadata_size(handle, ids[n]);
+        std::vector<uint8_t> xmp(xmpSize);
+        err = heif_image_handle_get_metadata(handle, ids[n], xmp.data());
+        if (err.code != heif_error_Ok) return err;
+        image.xmpData = std::move(xmp);
+      } else if (itemtype == "Exif") {
+        // read EXIF data to memory array
+        size_t exifSize = heif_image_handle_get_metadata_size(handle, ids[n]);
+        std::vector<uint8_t> exif(exifSize);
+        err = heif_image_handle_get_metadata(handle, ids[n], exif.data());
+        if (err.code != heif_error_Ok) return err;
+        image.exifData = std::move(exif);
+      }
+    }
+  }
+  return {heif_error_Ok, heif_suberror_Unspecified, nullptr};
+}
+
+uhdr_error_info_t map_heif_gainmap_metadata_uhdr_metadata(
+    struct heif_gain_map_metadata* heif_metadata, uhdr_gainmap_metadata_ext_t* uhdr_metadata) {
+  ultrahdr::uhdr_gainmap_metadata_frac decodedMetadata;
+  for (int c = 0; c < 3; ++c) {
+    decodedMetadata.gainMapMinN[c] = heif_metadata->gainMapMinN[c];
+    decodedMetadata.gainMapMinD[c] = heif_metadata->gainMapMinD[c];
+    decodedMetadata.gainMapMaxN[c] = heif_metadata->gainMapMaxN[c];
+    decodedMetadata.gainMapMaxD[c] = heif_metadata->gainMapMaxD[c];
+    decodedMetadata.gainMapGammaN[c] = heif_metadata->gainMapGammaN[c];
+    decodedMetadata.gainMapGammaD[c] = heif_metadata->gainMapGammaD[c];
+    decodedMetadata.baseOffsetN[c] = heif_metadata->baseOffsetN[c];
+    decodedMetadata.baseOffsetD[c] = heif_metadata->baseOffsetD[c];
+    decodedMetadata.alternateOffsetN[c] = heif_metadata->alternateOffsetN[c];
+    decodedMetadata.alternateOffsetD[c] = heif_metadata->alternateOffsetD[c];
+  }
+  decodedMetadata.baseHdrHeadroomN = heif_metadata->baseHdrHeadroomN;
+  decodedMetadata.baseHdrHeadroomD = heif_metadata->baseHdrHeadroomD;
+  decodedMetadata.alternateHdrHeadroomN = heif_metadata->alternateHdrHeadroomN;
+  decodedMetadata.alternateHdrHeadroomD = heif_metadata->alternateHdrHeadroomD;
+  decodedMetadata.backwardDirection = heif_metadata->backwardDirection;
+  decodedMetadata.useBaseColorSpace = heif_metadata->useBaseColorSpace;
+  return ultrahdr::uhdr_gainmap_metadata_frac::gainmapMetadataFractionToFloat(&decodedMetadata,
+                                                                              uhdr_metadata);
 }
 
 HeifR::HeifR(void* uhdrGLESCtxt, int mapDimensionScaleFactor, int mapCompressQuality,
@@ -294,6 +410,7 @@ uhdr_error_info_t HeifR::encodeHEIFR(uhdr_raw_image_t* sdr_intent, uhdr_raw_imag
   heif_image_handle* baseHandle = nullptr;
   heif_image* secondaryImage = nullptr;
   heif_image_handle* secondaryHandle = nullptr;
+  int sdr_cg_matrix;
 
   uhdr_raw_image_t* gainmap_img_yuv = gainmap_img;
   std::unique_ptr<uhdr_raw_image_ext_t> gainmap_yuv_ext;
@@ -344,14 +461,13 @@ uhdr_error_info_t HeifR::encodeHEIFR(uhdr_raw_image_t* sdr_intent, uhdr_raw_imag
     goto CleanUp;
   }
   HEIF_ERR_CHECK(set_internal_color_format(encoder, heif_img_fmt));
-  HEIF_ERR_CHECK(
-      heif_nclx_color_profile_set_color_primaries(sdrNclx, map_cg_cicp_primaries(sdr_intent->cg)));
+  HEIF_ERR_CHECK(heif_nclx_color_profile_set_color_primaries(
+      sdrNclx, map_primaries.find(sdr_intent->cg)->second));
   HEIF_ERR_CHECK(heif_nclx_color_profile_set_transfer_characteristics(
-      sdrNclx, map_ct_cicp_transfer_characteristics(sdr_intent->ct)));
+      sdrNclx, map_transfer.find(sdr_intent->ct)->second));
+  sdr_cg_matrix = sdr_intent->cg == UHDR_CG_DISPLAY_P3 ? UHDR_CG_BT_601 : sdr_intent->cg;
   HEIF_ERR_CHECK(heif_nclx_color_profile_set_matrix_coefficients(
-      sdrNclx, map_cg_cicp_matrix_coefficients(sdr_intent->cg == UHDR_CG_DISPLAY_P3
-                                                   ? (uhdr_color_gamut_t)UHDR_CG_BT_601
-                                                   : sdr_intent->cg)));
+      sdrNclx, map_matrix.find((uhdr_color_gamut_t)sdr_cg_matrix)->second));
   sdrNclx->full_range_flag = sdr_intent->range == UHDR_CR_FULL_RANGE ? true : false;
   options = heif_encoding_options_alloc();
   if (!options) {
@@ -412,7 +528,7 @@ uhdr_error_info_t HeifR::encodeHEIFR(uhdr_raw_image_t* sdr_intent, uhdr_raw_imag
   HEIF_ERR_CHECK(heif_nclx_color_profile_set_transfer_characteristics(
       gainmapNclx, heif_transfer_characteristic_unspecified));
   HEIF_ERR_CHECK(heif_nclx_color_profile_set_matrix_coefficients(
-      gainmapNclx, map_cg_cicp_matrix_coefficients((uhdr_color_gamut_t)UHDR_CG_BT_601)));
+      gainmapNclx, map_matrix.find((uhdr_color_gamut_t)UHDR_CG_BT_601)->second));
   gainmapNclx->full_range_flag = gainmap_img_yuv->range == UHDR_CR_FULL_RANGE ? true : false;
   options->output_nclx_profile = gainmapNclx;
   HEIF_ERR_CHECK(heif_image_set_nclx_color_profile(secondaryImage, gainmapNclx));
@@ -450,12 +566,12 @@ uhdr_error_info_t HeifR::encodeHEIFR(uhdr_raw_image_t* sdr_intent, uhdr_raw_imag
              "failed to allocate nclx color profile for tmap image");
     goto CleanUp;
   }
-  HEIF_ERR_CHECK(
-      heif_nclx_color_profile_set_color_primaries(hdrNclx, map_cg_cicp_primaries(gainmap_img->cg)));
+  HEIF_ERR_CHECK(heif_nclx_color_profile_set_color_primaries(
+      hdrNclx, map_primaries.find(gainmap_img->cg)->second));
   HEIF_ERR_CHECK(heif_nclx_color_profile_set_transfer_characteristics(
-      hdrNclx, map_ct_cicp_transfer_characteristics(gainmap_img->ct)));
+      hdrNclx, map_transfer.find(gainmap_img->ct)->second));
   HEIF_ERR_CHECK(heif_nclx_color_profile_set_matrix_coefficients(
-      hdrNclx, map_cg_cicp_matrix_coefficients(gainmap_img->cg)));
+      hdrNclx, map_matrix.find(gainmap_img->cg)->second));
   hdrNclx->full_range_flag = gainmap_img->range == UHDR_CR_FULL_RANGE ? true : false;
   (void)alternateIcc;
   HEIF_ERR_CHECK(heif_encoder_set_lossy_quality(encoder, mMapCompressQuality));
@@ -486,6 +602,148 @@ CleanUp:
   sdrNclx = nullptr;
   if (encoder) heif_encoder_release(encoder);
   encoder = nullptr;
+  if (ctx) heif_context_free(ctx);
+  ctx = nullptr;
+
+  return status;
+}
+
+/* Decode API */
+uhdr_error_info_t HeifR::decodeHEIFR(uhdr_compressed_image_t* uhdr_compressed_img,
+                                     uhdr_raw_image_t* dest, float max_display_boost,
+                                     uhdr_color_transfer_t output_ct, uhdr_img_fmt_t output_format,
+                                     uhdr_raw_image_t* gainmap_img,
+                                     uhdr_gainmap_metadata_t* gainmap_metadata) {
+  uhdr_error_info_t status = g_no_error;
+  struct heif_image_handle* base_handle = nullptr;
+  struct heif_image* sdr_image = nullptr;
+  struct heif_image_handle* gainmap_handle = nullptr;
+  struct heif_image* gainmap_image = nullptr;
+  struct heif_decoding_options* decoding_options = nullptr;
+  heif_color_profile_nclx* nclx = nullptr;
+  heif_gain_map_metadata heif_metadata;
+  uhdr_gainmap_metadata_ext_t uhdr_metadata(kJpegrVersion);
+  enum heif_colorspace out_colorspace;
+  enum heif_chroma out_chroma;
+  uhdr_img_fmt_t fmt;
+  int sdr_width, sdr_height;
+  int gainmap_width, gainmap_height;
+  std::unique_ptr<uhdr_raw_image_ext_t> sdr_intent, gainmap;
+  heif_context* ctx = heif_context_alloc();
+  if (!ctx) {
+    status.error_code = UHDR_CODEC_MEM_ERROR;
+    status.has_detail = 1;
+    snprintf(status.detail, sizeof status.detail, "failed to allocate heif context");
+    return status;
+  }
+  HEIF_ERR_CHECK(heif_context_read_from_memory_without_copy(
+      ctx, static_cast<const uint8_t*>(uhdr_compressed_img->data), uhdr_compressed_img->data_sz,
+      nullptr))
+  HEIF_ERR_CHECK(heif_context_get_primary_image_handle(ctx, &base_handle))
+  decoding_options = heif_decoding_options_alloc();
+  out_colorspace = heif_colorspace_RGB;
+  out_chroma = heif_chroma_interleaved_RGBA;
+  HEIF_ERR_CHECK(
+      heif_decode_image(base_handle, &sdr_image, out_colorspace, out_chroma, decoding_options))
+  HEIF_ERR_CHECK(heif_image_get_nclx_color_profile(sdr_image, &nclx))
+  HEIF_ERR_CHECK(map_heif_chroma_vars_to_fmt(out_colorspace, out_chroma, fmt))
+  sdr_width = heif_image_handle_get_width(base_handle);
+  sdr_height = heif_image_handle_get_height(base_handle);
+  sdr_intent = std::make_unique<uhdr_raw_image_ext_t>(
+      fmt, map_primaries_inverse(nclx->color_primaries),
+      map_transfer_inverse(nclx->transfer_characteristics),
+      nclx->full_range_flag ? UHDR_CR_FULL_RANGE : UHDR_CR_LIMITED_RANGE, sdr_width, sdr_height,
+      64);
+  heif_nclx_color_profile_free(nclx);
+  nclx = nullptr;
+  HEIF_ERR_CHECK(copy_img_plane(sdr_image, heif_channel_interleaved,
+                                sdr_intent->planes[UHDR_PLANE_PACKED], sdr_width, sdr_height,
+                                sdr_intent->stride[UHDR_PLANE_PACKED] * 4, 4))
+  if (gainmap_metadata != nullptr || output_ct != UHDR_CT_SRGB) {
+    HEIF_ERR_CHECK(heif_context_get_gain_map_image_handle(ctx, &gainmap_handle))
+    HEIF_ERR_CHECK(heif_context_get_gain_map_metadata(ctx, &heif_metadata))
+    status = map_heif_gainmap_metadata_uhdr_metadata(&heif_metadata, &uhdr_metadata);
+    if (status.error_code != UHDR_CODEC_OK) goto CleanUp;
+    if (gainmap_metadata != nullptr) {
+      std::copy(uhdr_metadata.min_content_boost, uhdr_metadata.min_content_boost + 3,
+                gainmap_metadata->min_content_boost);
+      std::copy(uhdr_metadata.max_content_boost, uhdr_metadata.max_content_boost + 3,
+                gainmap_metadata->max_content_boost);
+      std::copy(uhdr_metadata.gamma, uhdr_metadata.gamma + 3, gainmap_metadata->gamma);
+      std::copy(uhdr_metadata.offset_sdr, uhdr_metadata.offset_sdr + 3,
+                gainmap_metadata->offset_sdr);
+      std::copy(uhdr_metadata.offset_hdr, uhdr_metadata.offset_hdr + 3,
+                gainmap_metadata->offset_hdr);
+      gainmap_metadata->hdr_capacity_min = uhdr_metadata.hdr_capacity_min;
+      gainmap_metadata->hdr_capacity_max = uhdr_metadata.hdr_capacity_max;
+      gainmap_metadata->use_base_cg = uhdr_metadata.use_base_cg;
+    }
+    HEIF_ERR_CHECK(heif_image_handle_get_preferred_decoding_colorspace(
+        gainmap_handle, &out_colorspace, &out_chroma))
+    if (out_colorspace != heif_colorspace_monochrome) {
+      out_colorspace = heif_colorspace_RGB;
+      out_chroma = heif_chroma_interleaved_RGBA;
+    }
+    HEIF_ERR_CHECK(heif_decode_image(gainmap_handle, &gainmap_image, out_colorspace, out_chroma,
+                                     decoding_options))
+    HEIF_ERR_CHECK(heif_image_get_nclx_color_profile(gainmap_image, &nclx))
+    HEIF_ERR_CHECK(map_heif_chroma_vars_to_fmt(out_colorspace, out_chroma, fmt))
+    gainmap_width = heif_image_handle_get_width(gainmap_handle);
+    gainmap_height = heif_image_handle_get_height(gainmap_handle);
+    gainmap = std::make_unique<uhdr_raw_image_ext_t>(
+        fmt, map_matrix_inverse(nclx->matrix_coefficients),
+        map_transfer_inverse(nclx->transfer_characteristics),
+        nclx->full_range_flag ? UHDR_CR_FULL_RANGE : UHDR_CR_LIMITED_RANGE, gainmap_width,
+        gainmap_height, 64);
+    heif_nclx_color_profile_free(nclx);
+    nclx = nullptr;
+    if (out_colorspace == heif_colorspace_monochrome) {
+      HEIF_ERR_CHECK(copy_img_plane(gainmap_image, heif_channel_Y, gainmap->planes[UHDR_PLANE_Y],
+                                    gainmap_width, gainmap_height, gainmap->stride[UHDR_PLANE_Y],
+                                    1))
+    } else {
+      HEIF_ERR_CHECK(copy_img_plane(gainmap_image, heif_channel_interleaved,
+                                    gainmap->planes[UHDR_PLANE_PACKED], gainmap_width,
+                                    gainmap_height, gainmap->stride[UHDR_PLANE_PACKED] * 4, 4))
+    }
+    if (gainmap_img != nullptr) {
+      status = copy_raw_image(gainmap.get(), gainmap_img);
+      if (status.error_code != UHDR_CODEC_OK) goto CleanUp;
+    }
+    heif_error err = heif_context_get_tmap_nclx_color_profile(ctx, &nclx);
+    if (err.code == heif_error_Ok) {
+      gainmap->cg = map_primaries_inverse(nclx->color_primaries);
+      gainmap->ct = map_transfer_inverse(nclx->transfer_characteristics);
+      gainmap->range = nclx->full_range_flag ? UHDR_CR_FULL_RANGE : UHDR_CR_LIMITED_RANGE;
+      heif_nclx_color_profile_free(nclx);
+      nclx = nullptr;
+    } else {
+      gainmap->cg = sdr_intent->cg;
+      gainmap->ct = sdr_intent->ct;
+      gainmap->range = sdr_intent->range;
+    }
+  }
+
+  if (output_ct != UHDR_CT_SRGB) {
+    status = applyGainMap(sdr_intent.get(), gainmap.get(), &uhdr_metadata, output_ct, output_format,
+                          max_display_boost, dest);
+  } else {
+    status = copy_raw_image(sdr_intent.get(), dest);
+  }
+
+CleanUp:
+  if (decoding_options) heif_decoding_options_free(decoding_options);
+  decoding_options = nullptr;
+  if (nclx) heif_nclx_color_profile_free(nclx);
+  nclx = nullptr;
+  if (sdr_image) heif_image_release(sdr_image);
+  sdr_image = nullptr;
+  if (gainmap_image) heif_image_release(gainmap_image);
+  gainmap_image = nullptr;
+  if (gainmap_handle) heif_image_handle_release(gainmap_handle);
+  gainmap_handle = nullptr;
+  if (base_handle) heif_image_handle_release(base_handle);
+  base_handle = nullptr;
   if (ctx) heif_context_free(ctx);
   ctx = nullptr;
 

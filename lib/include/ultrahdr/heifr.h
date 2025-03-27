@@ -28,7 +28,24 @@
 #include "libheif/heif.h"
 #include "libheif/heif_experimental.h"
 
+#define HEIF_ERR_CHECK(x)                                               \
+  {                                                                     \
+    heif_error err = (x);                                               \
+    if (err.code != heif_error_Ok) {                                    \
+      status.error_code = UHDR_CODEC_ERROR;                             \
+      status.has_detail = 1;                                            \
+      snprintf(status.detail, sizeof status.detail, "%s", err.message); \
+      goto CleanUp;                                                     \
+    }                                                                   \
+  }
+
 namespace ultrahdr {
+
+extern heif_error get_image_metadata(struct heif_image_handle* handle,
+                                     ultrahdr::jpeg_info_struct& image);
+
+extern uhdr_error_info_t map_heif_gainmap_metadata_uhdr_metadata(
+    struct heif_gain_map_metadata* heif_metadata, uhdr_gainmap_metadata_ext_t* uhdr_metadata);
 
 class HeifR : public UltraHdr {
  public:
@@ -81,6 +98,51 @@ class HeifR : public UltraHdr {
    */
   uhdr_error_info_t encodeHEIFR(uhdr_raw_image_t* hdr_intent, uhdr_raw_image_t* sdr_intent,
                                 uhdr_compressed_image_t* dest, int quality, uhdr_mem_block_t* exif);
+
+  /*!\brief Decode API.
+   *
+   * Decompress ultrahdr heif/avif image.
+   *
+   * NOTE: This method requires that the ultrahdr input image contains an ICC profile with primaries
+   * that match those of a color gamut that this library is aware of; Bt.709, Display-P3, or
+   * Bt.2100. It also assumes the base image color transfer characteristics are sRGB.
+   *
+   * \param[in]       uhdr_compressed_img      compressed ultrahdr image descriptor
+   * \param[in, out]  dest                     output image descriptor to store decoded output
+   * \param[in]       max_display_boost        (optional) the maximum available boost supported by a
+   *                                           display, the value must be greater than or equal
+   *                                           to 1.0
+   * \param[in]       output_ct                (optional) output color transfer
+   * \param[in]       output_format            (optional) output pixel format
+   * \param[in, out]  gainmap_img              (optional) output image descriptor to store decoded
+   *                                           gainmap image
+   * \param[in, out]  gainmap_metadata         (optional) descriptor to store gainmap metadata
+   *
+   * \return uhdr_error_info_t #UHDR_CODEC_OK if operation succeeds, uhdr_codec_err_t otherwise.
+   *
+   * NOTE: This method only supports single gain map metadata values for fields that allow
+   * multi-channel metadata values.
+   *
+   * NOTE: Not all combinations of output color transfer and output pixel format are supported.
+   * Refer below table for supported combinations.
+   *         ----------------------------------------------------------------------
+   *         |           color transfer	       |          color format            |
+   *         ----------------------------------------------------------------------
+   *         |                 SDR             |          32bppRGBA8888           |
+   *         ----------------------------------------------------------------------
+   *         |             HDR_LINEAR          |          64bppRGBAHalfFloat      |
+   *         ----------------------------------------------------------------------
+   *         |               HDR_PQ            |          32bppRGBA1010102        |
+   *         ----------------------------------------------------------------------
+   *         |               HDR_HLG           |          32bppRGBA1010102        |
+   *         ----------------------------------------------------------------------
+   */
+  uhdr_error_info_t decodeHEIFR(uhdr_compressed_image_t* uhdr_compressed_img,
+                                uhdr_raw_image_t* dest, float max_display_boost = FLT_MAX,
+                                uhdr_color_transfer_t output_ct = UHDR_CT_LINEAR,
+                                uhdr_img_fmt_t output_format = UHDR_IMG_FMT_64bppRGBAHalfFloat,
+                                uhdr_raw_image_t* gainmap_img = nullptr,
+                                uhdr_gainmap_metadata_t* gainmap_metadata = nullptr);
 
  private:
   /*!\brief Encode API.
