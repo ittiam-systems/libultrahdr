@@ -1,4 +1,4 @@
-From 08c69fe91c83124105c93702c7d86e63e9d3f8b3 Mon Sep 17 00:00:00 2001
+From 1c452a07ff218f4d07a0a25c8909e4f077ed972a Mon Sep 17 00:00:00 2001
 From: Ram Mohan M <ram.mohan@ittiam.com>
 Date: Tue, 7 Jan 2025 16:46:56 +0530
 Subject: [PATCH] Add support for handling 'tmap' items
@@ -18,21 +18,25 @@ using option -DWITH_EXPERIMENTAL_GAIN_MAP=1
 
 TODO: add plugins for encoding, decoding uhdr images
 ---
- CMakePresets.json                  |   3 +
- libheif/CMakeLists.txt             |   4 +
- libheif/api/libheif/heif.cc        | 233 +++++++++++++++++++++++++++++
- libheif/api/libheif/heif.h         |  59 ++++++++
- libheif/api/libheif/heif_plugin.h  |   3 +
- libheif/context.cc                 |  68 ++++++++-
- libheif/context.h                  |   9 ++
- libheif/file.cc                    |   9 ++
- libheif/image-items/image_item.cc  |  17 +++
- libheif/image-items/image_item.h   |  52 ++++++-
- libheif/plugins/encoder_aom.cc     |   5 +
- libheif/plugins/encoder_kvazaar.cc |   5 +
- libheif/plugins/encoder_rav1e.cc   |   5 +
- libheif/plugins/encoder_x265.cc    |   5 +
- 14 files changed, 474 insertions(+), 3 deletions(-)
+ CMakePresets.json                      |   3 +
+ libheif/CMakeLists.txt                 |   4 +
+ libheif/api/libheif/heif_aux_images.cc | 117 +++++++++++++++++++++++++
+ libheif/api/libheif/heif_aux_images.h  |  38 ++++++++
+ libheif/api/libheif/heif_brands.h      |   7 ++
+ libheif/api/libheif/heif_encoding.cc   | 116 ++++++++++++++++++++++++
+ libheif/api/libheif/heif_encoding.h    |  14 +++
+ libheif/api/libheif/heif_plugin.h      |   3 +
+ libheif/brands.cc                      |   5 ++
+ libheif/context.cc                     |  68 +++++++++++++-
+ libheif/context.h                      |   9 ++
+ libheif/file.cc                        |   3 +
+ libheif/image-items/image_item.cc      |  17 ++++
+ libheif/image-items/image_item.h       |  52 ++++++++++-
+ libheif/plugins/encoder_aom.cc         |   5 ++
+ libheif/plugins/encoder_kvazaar.cc     |   5 ++
+ libheif/plugins/encoder_rav1e.cc       |   5 ++
+ libheif/plugins/encoder_x265.cc        |   5 ++
+ 18 files changed, 473 insertions(+), 3 deletions(-)
 
 diff --git a/CMakePresets.json b/CMakePresets.json
 index bbe8b49a..3662e753 100644
@@ -63,10 +67,10 @@ index bbe8b49a..3662e753 100644
          "WITH_REDUCED_VISIBILITY" : "ON",
          "WITH_HEADER_COMPRESSION" : "OFF",
 diff --git a/libheif/CMakeLists.txt b/libheif/CMakeLists.txt
-index e8d7e0dc..290b27f4 100644
+index 55d63136..c4085f34 100644
 --- a/libheif/CMakeLists.txt
 +++ b/libheif/CMakeLists.txt
-@@ -249,6 +249,10 @@ if (ENABLE_EXPERIMENTAL_MINI_FORMAT)
+@@ -308,6 +308,10 @@ if (ENABLE_EXPERIMENTAL_MINI_FORMAT)
              mini.cc)
  endif ()
  
@@ -77,17 +81,18 @@ index e8d7e0dc..290b27f4 100644
  write_basic_package_version_file(${PROJECT_NAME}-config-version.cmake COMPATIBILITY ExactVersion)
  
  install(TARGETS heif EXPORT ${PROJECT_NAME}-config
-diff --git a/libheif/api/libheif/heif.cc b/libheif/api/libheif/heif.cc
-index 0ff1afa3..5c9b9565 100644
---- a/libheif/api/libheif/heif.cc
-+++ b/libheif/api/libheif/heif.cc
-@@ -657,6 +657,124 @@ struct heif_error heif_context_get_primary_image_ID(struct heif_context* ctx, he
+diff --git a/libheif/api/libheif/heif_aux_images.cc b/libheif/api/libheif/heif_aux_images.cc
+index c32d3ecb..1f0c259a 100644
+--- a/libheif/api/libheif/heif_aux_images.cc
++++ b/libheif/api/libheif/heif_aux_images.cc
+@@ -339,3 +339,120 @@ void heif_image_handle_free_auxiliary_types(const struct heif_image_handle* hand
+ {
+   heif_image_handle_release_auxiliary_type(handle, out_type);
  }
- 
- 
++
 +#if WITH_EXPERIMENTAL_GAIN_MAP
 +
-+struct heif_error heif_image_handle_get_gain_map_image_handle(
++heif_error heif_image_handle_get_gain_map_image_handle(
 +    const struct heif_image_handle* handle, struct heif_image_handle** gain_map_handle) {
 +  if (!gain_map_handle) {
 +    return {heif_error_Usage_error, heif_suberror_Null_pointer_argument,
@@ -201,15 +206,82 @@ index 0ff1afa3..5c9b9565 100644
 +}
 +
 +#endif
+diff --git a/libheif/api/libheif/heif_aux_images.h b/libheif/api/libheif/heif_aux_images.h
+index db4c7360..0d84cb44 100644
+--- a/libheif/api/libheif/heif_aux_images.h
++++ b/libheif/api/libheif/heif_aux_images.h
+@@ -175,6 +175,44 @@ LIBHEIF_API
+ void heif_image_handle_free_auxiliary_types(const heif_image_handle* handle,
+                                             const char** out_type);
+ 
 +
++#if WITH_EXPERIMENTAL_GAIN_MAP
 +
- int heif_context_is_top_level_image_ID(struct heif_context* ctx, heif_item_id id)
- {
-   const std::vector<std::shared_ptr<ImageItem>> images = ctx->context->get_top_level_images(true);
-@@ -3435,6 +3553,121 @@ struct heif_error heif_context_encode_image(struct heif_context* ctx,
++// ------------------------- gain map images -------------------------
++
++// Get the gain map image associated with the main image. If no gain map image is available, this
++// method will return error.
++LIBHEIF_API
++struct heif_error heif_image_handle_get_gain_map_image_handle(
++    const struct heif_image_handle* handle, struct heif_image_handle** gain_map_handle);
++
++// Get the gain map metadata size associated with the main image. If no gain map image is available,
++// this method will return 0
++LIBHEIF_API
++size_t heif_image_handle_get_gain_map_metadata_size(const struct heif_image_handle* handle);
++
++// Get the gain map metadata associated with the main image. if no gain map image is available, this
++// method will return error
++LIBHEIF_API
++struct heif_error heif_image_handle_get_gain_map_metadata(const struct heif_image_handle* handle,
++                                                          void* out_data);
++
++// Get nclx color profile for derived image
++LIBHEIF_API
++struct heif_error heif_image_handle_get_derived_image_nclx_color_profile(
++    const struct heif_image_handle* handle, struct heif_color_profile_nclx** out_data);
++
++// Get raw color profile for derived image
++LIBHEIF_API
++size_t heif_image_handle_get_derived_image_raw_color_profile_size(
++    const struct heif_image_handle* handle);
++
++LIBHEIF_API
++struct heif_error heif_image_handle_get_derived_image_raw_color_profile(
++    const struct heif_image_handle* handle, void* out_data);
++
++#endif
++
+ #ifdef __cplusplus
  }
+ #endif
+diff --git a/libheif/api/libheif/heif_brands.h b/libheif/api/libheif/heif_brands.h
+index dfead286..de81600e 100644
+--- a/libheif/api/libheif/heif_brands.h
++++ b/libheif/api/libheif/heif_brands.h
+@@ -246,6 +246,13 @@ typedef uint32_t heif_brand2;
+ */
+ #define heif_brand2_1pic   heif_fourcc('1','p','i','c')
  
- 
++/**
++ * HEIF tone map brand (`tmap`).
++ *
++ * This is a compatible brand indicating the file contains a gainmap image.
++ */
++#define heif_brand2_tmap   heif_fourcc('t', 'm', 'a', 'p')
++
+ // H.264
+ #define heif_brand2_avci   heif_fourcc('a','v','c','i')
+ #define heif_brand2_avcs   heif_fourcc('a','v','c','s')
+diff --git a/libheif/api/libheif/heif_encoding.cc b/libheif/api/libheif/heif_encoding.cc
+index e2e16a8b..dc21872a 100644
+--- a/libheif/api/libheif/heif_encoding.cc
++++ b/libheif/api/libheif/heif_encoding.cc
+@@ -808,3 +808,119 @@ int heif_context_get_encoder_descriptors(struct heif_context* ctx,
+ {
+   return heif_get_encoder_descriptors(format, name, out_encoder_descriptors, count);
+ }
++
 +#if WITH_EXPERIMENTAL_GAIN_MAP
 +
 +struct heif_error heif_context_encode_gain_map_image(
@@ -285,7 +357,7 @@ index 0ff1afa3..5c9b9565 100644
 +  heif_encoding_options options;
 +  set_default_encoding_options(options);
 +  if (input_options != nullptr) {
-+    copy_options(options, *input_options);
++    heif_encoding_options_copy(&options, input_options);
 +  }
 +
 +  auto gainmap_encoding_result = ctx->context->encode_image(gain_map_image->image, encoder, options,
@@ -297,6 +369,8 @@ index 0ff1afa3..5c9b9565 100644
 +  std::shared_ptr<ImageItem> gain_map_image_item = *gainmap_encoding_result;
 +  Error error =
 +      ctx->context->link_gain_map(base_image_handle->image, gain_map_image_item, tmap_item_id);
++  base_image_handle->image->set_gain_map(gain_map_image_item);
++  // base_image_handle->image->add_metadata(); ??
 +  if (error != Error::Ok) {
 +    return error.error_struct(ctx->context.get());
 +  }
@@ -323,77 +397,14 @@ index 0ff1afa3..5c9b9565 100644
 +}
 +
 +#endif
-+
-+
- struct heif_error heif_context_encode_grid(struct heif_context* ctx,
-                                            struct heif_image** tiles,
-                                            uint16_t columns,
-diff --git a/libheif/api/libheif/heif.h b/libheif/api/libheif/heif.h
-index 344a106e..3c25cc32 100644
---- a/libheif/api/libheif/heif.h
-+++ b/libheif/api/libheif/heif.h
-@@ -884,6 +884,13 @@ typedef uint32_t heif_brand2;
- */
- #define heif_brand2_1pic   heif_fourcc('1','p','i','c')
+diff --git a/libheif/api/libheif/heif_encoding.h b/libheif/api/libheif/heif_encoding.h
+index 7828b73c..70e0f2ff 100644
+--- a/libheif/api/libheif/heif_encoding.h
++++ b/libheif/api/libheif/heif_encoding.h
+@@ -384,6 +384,20 @@ int heif_context_get_encoder_descriptors(heif_context*, // TODO: why do we need
+                                          const heif_encoder_descriptor** out_encoders,
+                                          int count);
  
-+/**
-+ * HEIF tone map brand (`tmap`).
-+ *
-+ * This is a compatible brand indicating the file contains a gainmap image.
-+ */
-+#define heif_brand2_tmap heif_fourcc('t', 'm', 'a', 'p')
-+
- // input data should be at least 12 bytes
- LIBHEIF_API
- heif_brand2 heif_read_main_brand(const uint8_t* data, int len);
-@@ -1453,6 +1460,42 @@ struct heif_error heif_image_handle_get_auxiliary_image_handle(const struct heif
-                                                                heif_item_id auxiliary_id,
-                                                                struct heif_image_handle** out_auxiliary_handle);
- 
-+#if WITH_EXPERIMENTAL_GAIN_MAP
-+
-+// ------------------------- gain map images -------------------------
-+
-+// Get the gain map image associated with the main image. If no gain map image is available, this
-+// method will return error.
-+LIBHEIF_API
-+struct heif_error heif_image_handle_get_gain_map_image_handle(
-+    const struct heif_image_handle* handle, struct heif_image_handle** gain_map_handle);
-+
-+// Get the gain map metadata size associated with the main image. If no gain map image is available,
-+// this method will return 0
-+LIBHEIF_API
-+size_t heif_image_handle_get_gain_map_metadata_size(const struct heif_image_handle* handle);
-+
-+// Get the gain map metadata associated with the main image. if no gain map image is available, this
-+// method will return error
-+LIBHEIF_API
-+struct heif_error heif_image_handle_get_gain_map_metadata(const struct heif_image_handle* handle,
-+                                                          void* out_data);
-+
-+// Get nclx color profile for derived image
-+LIBHEIF_API
-+struct heif_error heif_image_handle_get_derived_image_nclx_color_profile(
-+    const struct heif_image_handle* handle, struct heif_color_profile_nclx** out_data);
-+
-+// Get raw color profile for derived image
-+LIBHEIF_API
-+size_t heif_image_handle_get_derived_image_raw_color_profile_size(
-+    const struct heif_image_handle* handle);
-+
-+LIBHEIF_API
-+struct heif_error heif_image_handle_get_derived_image_raw_color_profile(
-+    const struct heif_image_handle* handle, void* out_data);
-+
-+#endif
- 
- // ------------------------- metadata (Exif / XMP) -------------------------
- 
-@@ -2619,6 +2662,22 @@ LIBHEIF_API
- int heif_encoder_descriptor_supportes_lossless_compression(const struct heif_encoder_descriptor*);
- 
- 
-+
 +#if WITH_EXPERIMENTAL_GAIN_MAP
 +
 +// Compress the gain map image and write metadata.
@@ -408,15 +419,14 @@ index 344a106e..3c25cc32 100644
 +
 +#endif
 +
-+
  #ifdef __cplusplus
  }
  #endif
 diff --git a/libheif/api/libheif/heif_plugin.h b/libheif/api/libheif/heif_plugin.h
-index 3a438bfc..533a1ebc 100644
+index 622ae738..d7a573c7 100644
 --- a/libheif/api/libheif/heif_plugin.h
 +++ b/libheif/api/libheif/heif_plugin.h
-@@ -129,6 +129,9 @@ enum heif_image_input_class
+@@ -132,6 +132,9 @@ enum heif_image_input_class
    heif_image_input_class_alpha = 2,
    heif_image_input_class_depth = 3,
    heif_image_input_class_thumbnail = 4
@@ -426,11 +436,27 @@ index 3a438bfc..533a1ebc 100644
  };
  
  
+diff --git a/libheif/brands.cc b/libheif/brands.cc
+index c5632717..c4b85e53 100644
+--- a/libheif/brands.cc
++++ b/libheif/brands.cc
+@@ -117,6 +117,11 @@ std::vector<heif_brand2> compute_compatible_brands(const HeifContext* ctx, heif_
+                   brand) == compatible_brands.end()) {
+       compatible_brands.push_back(brand);
+     }
++#if WITH_EXPERIMENTAL_GAIN_MAP
++    if (img->get_gain_map() != nullptr) {
++      compatible_brands.push_back(heif_brand2_tmap);
++    }
++#endif
+ 
+     if (!img->is_miaf_compatible()) {
+       miaf_compatible = false;
 diff --git a/libheif/context.cc b/libheif/context.cc
-index b40efe63..8cdb2aca 100644
+index 2a08a9ee..4a38e13a 100644
 --- a/libheif/context.cc
 +++ b/libheif/context.cc
-@@ -329,10 +329,12 @@ Error HeifContext::interpret_heif_file()
+@@ -451,10 +451,12 @@ Error HeifContext::interpret_heif_file_images()
    m_top_level_images.clear();
    m_primary_image.reset();
  
@@ -444,7 +470,7 @@ index b40efe63..8cdb2aca 100644
  
    for (heif_item_id id : image_IDs) {
      auto infe_box = m_heif_file->get_infe_box(id);
-@@ -799,6 +801,12 @@ Error HeifContext::interpret_heif_file()
+@@ -921,6 +923,12 @@ Error HeifContext::interpret_heif_file_images()
          // these item types should have data
          return err;
        }
@@ -457,7 +483,7 @@ index b40efe63..8cdb2aca 100644
        else {
          // anything else is probably something that we don't understand yet
          continue;
-@@ -823,6 +831,41 @@ Error HeifContext::interpret_heif_file()
+@@ -945,6 +953,41 @@ Error HeifContext::interpret_heif_file_images()
          }
          img_iter->second->add_metadata(metadata);
        }
@@ -499,7 +525,7 @@ index b40efe63..8cdb2aca 100644
      }
    }
  
-@@ -1158,6 +1201,29 @@ create_alpha_image_from_image_alpha_channel(const std::shared_ptr<HeifPixelImage
+@@ -1299,6 +1342,29 @@ create_alpha_image_from_image_alpha_channel(const std::shared_ptr<HeifPixelImage
  }
  
  
@@ -530,18 +556,18 @@ index b40efe63..8cdb2aca 100644
                                  struct heif_encoder* encoder,
                                  const struct heif_encoding_options& in_options,
 diff --git a/libheif/context.h b/libheif/context.h
-index 3f4f0bc3..48e86c8a 100644
+index 6d41565a..30125d95 100644
 --- a/libheif/context.h
 +++ b/libheif/context.h
-@@ -47,6 +47,7 @@ class StreamWriter;
+@@ -49,6 +49,7 @@ class ImageItem;
  
- class ImageItem;
+ class Track;
  
 +class ImageMetadata;
  
  // This is a higher-level view than HeifFile.
  // Images are grouped logically into main images and their thumbnails.
-@@ -147,6 +148,14 @@ public:
+@@ -156,6 +157,14 @@ public:
  
    Result<heif_item_id> add_pyramid_group(const std::vector<heif_item_id>& layers);
  
@@ -557,30 +583,10 @@ index 3f4f0bc3..48e86c8a 100644
  
    void add_region_item(std::shared_ptr<RegionItem> region_item)
 diff --git a/libheif/file.cc b/libheif/file.cc
-index 8a678bf9..e725f4db 100644
+index df10cfb9..f68a217c 100644
 --- a/libheif/file.cc
 +++ b/libheif/file.cc
-@@ -192,6 +192,9 @@ void HeifFile::set_brand(heif_compression_format format, bool miaf_compatible)
-       m_ftyp_box->set_minor_version(0);
-       m_ftyp_box->add_compatible_brand(heif_brand2_mif1);
-       m_ftyp_box->add_compatible_brand(heif_brand2_heic);
-+#if WITH_EXPERIMENTAL_GAIN_MAP
-+      m_ftyp_box->add_compatible_brand(heif_brand2_tmap);
-+#endif
-       break;
- 
-     case heif_compression_AV1:
-@@ -199,6 +202,9 @@ void HeifFile::set_brand(heif_compression_format format, bool miaf_compatible)
-       m_ftyp_box->set_minor_version(0);
-       m_ftyp_box->add_compatible_brand(heif_brand2_avif);
-       m_ftyp_box->add_compatible_brand(heif_brand2_mif1);
-+#if WITH_EXPERIMENTAL_GAIN_MAP
-+      m_ftyp_box->add_compatible_brand(heif_brand2_tmap);
-+#endif
-       break;
- 
-     case heif_compression_VVC:
-@@ -352,6 +358,9 @@ Error HeifFile::parse_heif_file()
+@@ -341,6 +341,9 @@ Error HeifFile::parse_heif_file()
        !m_ftyp_box->has_compatible_brand(heif_brand2_1pic) &&
  #if ENABLE_EXPERIMENTAL_MINI_FORMAT
        !(m_ftyp_box->get_major_brand() == heif_brand2_mif3) &&
@@ -588,13 +594,13 @@ index 8a678bf9..e725f4db 100644
 +#if WITH_EXPERIMENTAL_GAIN_MAP
 +      !(m_ftyp_box->get_major_brand() == heif_brand2_tmap) &&
  #endif
-       !m_ftyp_box->has_compatible_brand(heif_brand2_jpeg)) {
-     std::stringstream sstr;
+       !m_ftyp_box->has_compatible_brand(heif_brand2_jpeg) &&
+       !is_brand_msf1) {
 diff --git a/libheif/image-items/image_item.cc b/libheif/image-items/image_item.cc
-index 549880b6..76dbaf2e 100644
+index ef3450ab..77e1e51e 100644
 --- a/libheif/image-items/image_item.cc
 +++ b/libheif/image-items/image_item.cc
-@@ -386,6 +386,17 @@ Error ImageItem::encode_to_item(HeifContext* ctx,
+@@ -402,6 +402,17 @@ Error ImageItem::encode_to_item(HeifContext* ctx,
    auto infe_box = ctx->get_heif_file()->add_new_infe_box(get_infe_type());
    heif_item_id image_id = infe_box->get_item_ID();
    set_id(image_id);
@@ -612,9 +618,9 @@ index 549880b6..76dbaf2e 100644
  
    ctx->get_heif_file()->append_iloc_data(image_id, codedImage.bitstream, 0);
  
-@@ -646,7 +657,13 @@ void ImageItem::add_color_profile(const std::shared_ptr<HeifPixelImage>& image,
+@@ -556,7 +567,13 @@ void ImageItem::add_color_profile(const std::shared_ptr<HeifPixelImage>& image,
                                    const heif_color_profile_nclx* target_heif_nclx,
-                                   ImageItem::CodedImageData& inout_codedImage)
+                                   Encoder::CodedImageData& inout_codedImage)
  {
 +#if WITH_EXPERIMENTAL_GAIN_MAP
 +  if (input_class == heif_image_input_class_normal ||
@@ -627,10 +633,10 @@ index 549880b6..76dbaf2e 100644
      if (icc_profile) {
        auto colr = std::make_shared<Box_colr>();
 diff --git a/libheif/image-items/image_item.h b/libheif/image-items/image_item.h
-index 5f0d2b2b..8a9fdb32 100644
+index ee58d076..80bb8e25 100644
 --- a/libheif/image-items/image_item.h
 +++ b/libheif/image-items/image_item.h
-@@ -82,12 +82,14 @@ public:
+@@ -78,12 +78,14 @@ public:
  
    virtual Result<std::vector<uint8_t>> read_bitstream_configuration_data() const { return std::vector<uint8_t>{}; }
  
@@ -647,7 +653,7 @@ index 5f0d2b2b..8a9fdb32 100644
    }
  
    HeifContext* get_context() { return m_heif_context; }
-@@ -264,6 +266,44 @@ public:
+@@ -260,6 +262,44 @@ public:
      }
    }
  
@@ -692,7 +698,7 @@ index 5f0d2b2b..8a9fdb32 100644
  
    // --- metadata
  
-@@ -417,10 +457,18 @@ private:
+@@ -403,10 +443,18 @@ private:
    std::string m_aux_image_type;
    std::vector<std::shared_ptr<ImageItem>> m_aux_images;
  
@@ -712,7 +718,7 @@ index 5f0d2b2b..8a9fdb32 100644
    bool m_miaf_compatible = true;
  
 diff --git a/libheif/plugins/encoder_aom.cc b/libheif/plugins/encoder_aom.cc
-index 9c01a50e..c16ea30b 100644
+index d6fd0d3f..08a4322d 100644
 --- a/libheif/plugins/encoder_aom.cc
 +++ b/libheif/plugins/encoder_aom.cc
 @@ -1073,7 +1073,12 @@ struct heif_error aom_encode_image(void* encoder_raw, const struct heif_image* i
@@ -729,7 +735,7 @@ index 9c01a50e..c16ea30b 100644
      aom_error = aom_codec_control(&codec, AV1E_SET_MATRIX_COEFFICIENTS, nclx->matrix_coefficients); CHECK_ERROR;
      aom_error = aom_codec_control(&codec, AV1E_SET_TRANSFER_CHARACTERISTICS, nclx->transfer_characteristics); CHECK_ERROR;
 diff --git a/libheif/plugins/encoder_kvazaar.cc b/libheif/plugins/encoder_kvazaar.cc
-index 9db79a6c..6acb35b7 100644
+index a03cd759..fca75579 100644
 --- a/libheif/plugins/encoder_kvazaar.cc
 +++ b/libheif/plugins/encoder_kvazaar.cc
 @@ -567,7 +567,12 @@ static struct heif_error kvazaar_encode_image(void* encoder_raw, const struct he
@@ -746,7 +752,7 @@ index 9db79a6c..6acb35b7 100644
      config->vui.transfer = nclx->transfer_characteristics;
      config->vui.colormatrix = nclx->matrix_coefficients;
 diff --git a/libheif/plugins/encoder_rav1e.cc b/libheif/plugins/encoder_rav1e.cc
-index 6a0ca759..7e0fbac8 100644
+index a555d629..56e440e4 100644
 --- a/libheif/plugins/encoder_rav1e.cc
 +++ b/libheif/plugins/encoder_rav1e.cc
 @@ -550,7 +550,12 @@ struct heif_error rav1e_encode_image(void* encoder_raw, const struct heif_image*

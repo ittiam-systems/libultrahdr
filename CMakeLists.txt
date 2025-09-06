@@ -590,7 +590,7 @@ if(UHDR_ENABLE_EXPERIMENTAL_FEATURES)
   set(HEIF_LIBRARIES ${HEIF_LIB_PREFIX}${HEIF_LIB})
   ExternalProject_Add(${HEIF_TARGET_NAME}
       GIT_REPOSITORY https://github.com/strukturag/libheif.git
-      GIT_TAG v1.19.7
+      GIT_TAG v1.20.0
       PATCH_COMMAND git am ${CMAKE_CURRENT_SOURCE_DIR}/cmake/0001-Add-support-for-handling-tmap-items.patch
       PREFIX ${HEIF_PREFIX_DIR}
       SOURCE_DIR ${HEIF_SOURCE_DIR}
